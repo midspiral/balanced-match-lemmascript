@@ -6,7 +6,7 @@ This is a fork of [juliangruber/balanced-match](https://github.com/juliangruber/
 
 ## Verified properties
 
-For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
+For any inputs `a`, `b` with `a.length > 0 && b.length > 0` (plus a `NoOverlap` precondition for the Dyck-balance invariant — see below):
 
 | Property | Statement |
 |---|---|
@@ -16,12 +16,9 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
 | **`a` is at `result[0]`** | `str.slice(result[0], result[0] + a.length) === a` — the first index is a valid `a`-occurrence position. |
 | **`b` is at `result[1]`** | `str.slice(result[1], result[1] + b.length) === b` — the second index is a valid `b`-occurrence position. |
 | **Ordering** | `result[0] <= result[1]` — the `a`-index is at or before the `b`-index. |
+| **Dyck-balance foundation (Phase 2)** | Under `NoOverlap` (no position of `str` is both an `a`-start and a `b`-start): `pushedCount == CountAll(str, a, begs[0], ai-bound)` and `poppedCount == CountAll(str, b, begs[0], bi-bound)` throughout the loop. The algorithm's per-branch push/pop counts equal the overlapping occurrence counts of `a` and `b` in the substring `str[begs[0]..]` up to the current scan position. |
 
-5 Dafny verification chunks, 0 errors. The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and the decreases metric); the `.dfy` file adds the proof-only invariants and assertions that LS's `\result`-narrowing doesn't reach (the `match result { case Some(v) => ... }` form for local-variable Option fields).
-
-The ordering postcondition is supported by an `i == -1 || forall j, begs[j] <= i` invariant — every pushed entry is at or before the current scan position, with a disjunct for the terminal state where the loop is about to exit with leftover entries.
-
-The proof also carries an internal **algorithmic accounting** invariant, `|begs| == pushedCount - poppedCount`, via two `ghost var` counters incremented in the push/pop branches. This is a foundation for any future Dyck-balanced argument: it ties the current stack depth to a count of branch-1 vs branch-2/3 events. Not yet exposed as an `ensures` since ghost variables don't survive past the method.
+The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and the decreases metric); the `.dfy` file adds the proof-only invariants, helper lemmas, and bridging asserts that LS's `\result`-narrowing doesn't reach.
 
 ## What the proof attempt surfaced
 
@@ -33,12 +30,30 @@ range("ab", "a", "aab")  ===>  [1, 1]
 
 Walking through: position 1 of `"aab"` matches both `a = "ab"` (since `str[1..3] == "ab"`) and `b = "a"` (since `str[1..2] == "a"`). The algorithm pushes position 1 as an `a`-occurrence, later pops it via the fallback path, and sets both `left := 1` and `right := 1`. The returned `[left, right]` collapses to `[1, 1]`.
 
-This isn't a bug in the algorithm — it's a real edge of the contract. Strict ordering would require a precondition that `a` and `b` don't co-locate any starting positions in `str`, which is non-trivial to state. The `<=` form holds universally.
+This isn't a bug in the algorithm — it's a real edge of the contract. Strict ordering would require a precondition that `a` and `b` don't co-locate any starting positions in `str`, which is exactly the `NoOverlap` precondition the Phase 2 invariants depend on.
 
-## What's not (yet) verified (Phase 2)
+## Phase 2 proof structure
 
-- **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Even simpler counterexample than above: `a = "ab"`, `b = "b"`, `str = "ab"` → returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring. Capturing exactly when non-overlap holds would split the postcondition by a "no shared starts" precondition on `(a, b, str)`.
-- **Dyck-balanced body** — when the returned pair *is* non-overlapping, the substring between `result[0] + a.length` and `result[1]` should be balanced: equal counts of `a` and `b` occurrences with every prefix having `count(a) ≥ count(b)`. This is the headline correctness property. **Attempted twice** with a ghost `CountAll(s, sub, lo, hi)` function plus an invariant `pushedCount == CountAll(str, a, begs[0], i + |a| − 1)` (under a `NoOverlap(a, b, str)` precondition). Both attempts (left-recursive and right-recursive `CountAll`) fail maintenance: Dafny can't connect *push events* (an algorithmic concept) to *substring matches* without explicitly tracking which positions were visited. A working proof needs (a) a ghost `visited: set<int>` of a-positions seen, (b) lemmas tying `|visited|` to `CountAll` over the right range, (c) case-analysis on whether the next step advances past a new a-position or not. Estimated ~4–6 hours of focused proof engineering.
+The Dyck-balance foundation invariants connect the algorithm's *event counts* (each branch-1 push, branch-2 / branch-3 pop) to *substring occurrence counts* in `str`. The proof rests on five pieces:
+
+1. **`CountAll(s, sub, lo, hi)`** — a ghost function counting overlapping occurrences of `sub` in `s[lo..hi]`. Defined by recursion on `hi` so the recursive case *is* the extension-by-one equation; no separate extension lemma needed beyond what the body computes.
+2. **`IndexOfMaxAt`** — a pointwise maximality lemma: at any position `p` strictly before `StringIndexOfFromN(s, sub, from)`, `sub` does not start at `p`. Avoids the quantifier-trigger trap of stating maximality as a forall in `StringIndexOf`'s postcondition.
+3. **`CountAllExtendNoMatch` / `CountAllExtendOneMatch`** — extension lemmas: extending the upper bound over a range with no new matches (or exactly one) changes `CountAll` by 0 or 1.
+4. **`CountAllExtendsByOne`** — the *single-forall* helper. Given that `s[p..p+|sub|] == sub` and `nextFrom = StringIndexOfFromN(s, sub, p+1)`, it bundles "build the no-match forall over `(matchK, hi_new]` using `IndexOfMaxAt`" and "apply `CountAllExtendOneMatch`" into one lemma. This is the key factoring — the `forall k` block lives in the lemma's body (small context), not in the main method.
+5. **`CountAllZeroFromOtherStart` + `NoOverlapAtAPos`** — for the iter-1 case (first push), establishes `poppedCount == 0 == CountAll(str, b, begs[0], hi_b)` by combining a point-wise NoOverlap fact with `CountAllExtendNoMatch`.
+
+Plus three ghost-state additions in the loop:
+
+- **`pushedCount`/`poppedCount` ghost counters** — accounting `|begs| == pushedCount - poppedCount` (algorithmic foundation).
+- **`aiLowerBound`/`biLowerBound` ghost trackers** — the `from` arguments most recently passed to `indexOf`. Combined with the invariant `bi == StringIndexOfFromN(str, b, biLowerBound)`, this lets the maintenance proofs apply `IndexOfMaxAt` at the right `from` without re-deriving it.
+- **Loop-entry pin invariant** — `|begs| == 0 && result.None? ==> pushedCount == 0 && poppedCount == 0 && bounds at initial values`. Iter 1 is the only iteration with empty `begs` and `result` still `None`; this invariant lets the iter-1 maintenance proof transition cleanly from "vacuous" to "established."
+
+**Verification cost.** Even with the lemma factoring, Z3 needs `--isolate-assertions` and a per-assertion timeout of ~200 seconds to discharge the iter-1 case (specifically, the `CountAllZeroFromOtherStart` maintenance for the poppedCount invariant). The case study is therefore registered in `LemmaScript-files.txt` with `300 --isolate-assertions`, which puts it on the `check.sh dafny-slow` track (not the default `dafny` track).
+
+## What's not (yet) verified
+
+- **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Counterexample: `a = "ab"`, `b = "b"`, `str = "ab"` → returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring.
+- **Dyck-balance as an `ensures`** — the count-balance is currently a loop invariant tied to ghost counters, not an `ensures` on the returned `[s, e]`. Converting it to an output property would require characterizing `pushedCount == poppedCount` at the moment `result` is set in branch 2 and deriving `CountAll(str, a, s+1, e) == CountAll(str, b, s+1, e)` from the invariants, plus handling the fallback path separately.
 - **First-balanced-pair-to-close** — the algorithm has a particular canonical choice (the leftmost `a` whose matching `b` fully closes the run); characterizing this precisely would tighten what callers can rely on.
 - **Fallback path semantics** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned `[left, right]` is the deepest opened-and-closed inner pair. Endpoint validity is verified; *which* pair it is, isn't.
 
@@ -55,27 +70,37 @@ cd ../LemmaScript && npm install && npm run build
 
 ## Verify
 
+The Phase 2 invariants require Dafny's `--isolate-assertions` mode with a per-assertion time limit of ~200s — this is set up via `LemmaScript-files.txt` in the repo root:
+
+```
+src/index.ts 300 --isolate-assertions
+```
+
+Run via the LemmaScript `check.sh` driver in `dafny-slow` mode (which honors per-file timeouts above the default 60s CI ceiling):
+
 ```sh
-cd src
-node ../../LemmaScript/tools/dist/lsc.js check --backend=dafny index.ts
+../LemmaScript/tools/check.sh dafny-slow
 ```
 
 Output:
 
 ```
-Dafny program verifier finished with 5 verified, 0 errors
+Dafny program verifier finished with 424 verified, 0 errors
 ```
+
+(The default `check.sh dafny` mode skips this file as gen-check-only because its timeout exceeds the 60s CI threshold.)
 
 ## File Structure
 
 ```
 src/
-  index.ts        ← Production TypeScript with //@ annotations on `range`
-  index.dfy.gen   ← LS-generated Dafny (regeneratable from index.ts)
-  index.dfy       ← Verification target: gen + proof-only invariants & asserts
+  index.ts            ← Production TypeScript with //@ annotations on `range`
+  index.dfy.gen       ← LS-generated Dafny (regeneratable from index.ts)
+  index.dfy           ← Verification target: gen + proof-only lemmas, invariants, asserts
+LemmaScript-files.txt ← Registers index.ts with the 300s --isolate-assertions config
 ```
 
-The diff between `index.dfy.gen` and `index.dfy` is additions-only — all additions are loop invariants Dafny needs that can't be expressed in the TS surface (because LS's narrowing of `match` on local `Option`-typed vars doesn't reach into the invariant), plus a handful of asserts that bridge facts from invariants to use-sites.
+The diff between `index.dfy.gen` and `index.dfy` is additions-only — proof-only lemmas (`CountAll`, `IndexOfMaxAt`, `CountAllExtend*`, `CountAllExtendsByOne`, `CountAllZeroFromOtherStart`, `NoOverlapAtAPos`), loop invariants Dafny needs that can't be expressed in the TS surface, plus bridging asserts that thread facts from invariants to use-sites.
 
 ## LemmaScript toolchain additions driven by this case study
 

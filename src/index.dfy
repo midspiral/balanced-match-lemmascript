@@ -29,9 +29,142 @@ function StringIndexOfFromN(s: string, sub: string, from: nat): int
   else StringIndexOfFromN(s, sub, from + 1)
 }
 
+// Pointwise maximality: at any p before the returned index, no match exists.
+lemma IndexOfMaxAt(s: string, sub: string, from: nat, p: int)
+  requires |sub| > 0
+  requires from <= p
+  requires p + |sub| <= |s|
+  requires StringIndexOfFromN(s, sub, from) == -1 || p < StringIndexOfFromN(s, sub, from)
+  ensures s[p..p+|sub|] != sub
+  decreases |s| - from
+{
+  if from + |sub| > |s| {
+  } else if s[from..from + |sub|] == sub {
+  } else if p == from {
+  } else {
+    IndexOfMaxAt(s, sub, from + 1, p);
+  }
+}
+
+// Count of (overlapping) occurrences of `sub` in s[lo..hi]. Recurses on `hi`
+// so the recursive case IS the extension-by-1 equation.
+function CountAll(s: string, sub: string, lo: int, hi: int): nat
+  requires 0 <= lo <= hi <= |s|
+  requires |sub| > 0
+  decreases hi - lo
+{
+  if hi - lo < |sub| then 0
+  else (if s[hi - |sub|..hi] == sub then 1 else 0) + CountAll(s, sub, lo, hi - 1)
+}
+
+// Extending hi over a range with no new matches doesn't change the count.
+lemma CountAllExtendNoMatch(s: string, sub: string, lo: int, hi: int, hi': int)
+  requires 0 <= lo <= hi <= hi' <= |s|
+  requires |sub| > 0
+  requires forall k :: hi < k <= hi' && k >= lo + |sub| ==> s[k - |sub|..k] != sub
+  ensures CountAll(s, sub, lo, hi') == CountAll(s, sub, lo, hi)
+  decreases hi' - hi
+{
+  if hi' > hi {
+    CountAllExtendNoMatch(s, sub, lo, hi, hi' - 1);
+  }
+}
+
+// Extending hi to include exactly one new match at hi position `matchK` adds 1.
+lemma CountAllExtendOneMatch(s: string, sub: string, lo: int, hi: int, matchK: int, hi': int)
+  requires 0 <= lo <= hi < matchK <= hi' <= |s|
+  requires |sub| > 0
+  requires matchK >= lo + |sub|
+  requires s[matchK - |sub|..matchK] == sub
+  requires forall k :: hi < k <= hi' && k != matchK && k >= lo + |sub| ==> s[k - |sub|..k] != sub
+  ensures CountAll(s, sub, lo, hi') == CountAll(s, sub, lo, hi) + 1
+  decreases hi' - matchK
+{
+  if hi' > matchK {
+    CountAllExtendOneMatch(s, sub, lo, hi, matchK, hi' - 1);
+  } else {
+    CountAllExtendNoMatch(s, sub, lo, hi, matchK - 1);
+  }
+}
+
+// ====================================================================
+// The two standalone lemmas that drive the maintenance proofs. They
+// isolate the per-`k` forall reasoning into a small context (their own
+// bodies) so the main method's verifier doesn't have to instantiate
+// IndexOfMaxAt at every k under the method's full invariant context.
+// ====================================================================
+
+// "Extending CountAll's upper bound past the next match position adds exactly
+// one." Used for both pushedCount maintenance (sub = a, p = the just-visited
+// a-position) and poppedCount maintenance (sub = b, p = the just-popped
+// b-position).
+lemma CountAllExtendsByOne(s: string, sub: string, lo: int, p: int)
+  requires |sub| > 0
+  requires 0 <= lo <= p
+  requires p + |sub| <= |s|
+  requires s[p..p + |sub|] == sub
+  ensures var nextFrom := StringIndexOfFromN(s, sub, p + 1);
+          var hi_new := if nextFrom >= 0 then nextFrom + |sub| - 1 else |s|;
+          var hi_old := p + |sub| - 1;
+          0 <= hi_old <= hi_new <= |s|
+       && CountAll(s, sub, lo, hi_new) == CountAll(s, sub, lo, hi_old) + 1
+{
+  var nextFrom := StringIndexOfFromN(s, sub, p + 1);
+  var hi_old := p + |sub| - 1;
+  var hi_new := if nextFrom >= 0 then nextFrom + |sub| - 1 else |s|;
+  var matchK := p + |sub|;
+  assert hi_old < matchK;
+  // No matches in (matchK, hi_new]: position q = k - |sub| satisfies q > p,
+  // and q < nextFrom (or nextFrom = -1), so IndexOfMaxAt applies.
+  forall k | matchK < k <= hi_new && k >= lo + |sub|
+    ensures s[k - |sub|..k] != sub
+  {
+    IndexOfMaxAt(s, sub, p + 1, k - |sub|);
+  }
+  CountAllExtendOneMatch(s, sub, lo, hi_old, matchK, hi_new);
+}
+
+// Instantiate the NoOverlap precondition at a single position (avoids the
+// universal-quantifier instantiation pain at call sites).
+lemma NoOverlapAtAPos(a: string, b: string, s: string, p: int)
+  requires |a| > 0 && |b| > 0
+  requires 0 <= p && p + |a| <= |s| && p + |b| <= |s|
+  requires s[p..p + |a|] == a
+  requires forall q: nat :: q + |a| <= |s| ==> q + |b| <= |s| ==>
+                             (s[q..q + |a|] != a || s[q..q + |b|] != b)
+  ensures s[p..p + |b|] != b
+{ }
+
+// "When p has no sub-start, CountAll(s, sub, p, hi_b) == 0 where hi_b extends
+// up to the next sub-position via indexOf." Takes the point-wise no-overlap
+// fact as a precondition (caller instantiates NoOverlap separately) — avoids
+// having to unify universal-quantifier preconditions across method boundaries.
+lemma CountAllZeroFromOtherStart(s: string, sub: string, p: int, from: nat,
+                                 theIndex: int, hi_b: int)
+  requires |sub| > 0
+  requires 0 <= p
+  requires from == p + 1
+  requires theIndex == StringIndexOfFromN(s, sub, from)
+  requires hi_b == (if theIndex >= 0 then theIndex + |sub| - 1 else |s|)
+  requires p <= hi_b <= |s|
+  // Point-wise no-overlap: sub doesn't start at p (or doesn't fit).
+  requires p + |sub| > |s| || s[p..p + |sub|] != sub
+  ensures CountAll(s, sub, p, hi_b) == 0
+{
+  forall k | p < k <= hi_b && k >= p + |sub|
+    ensures s[k - |sub|..k] != sub
+  {
+    if k != p + |sub| {
+      IndexOfMaxAt(s, sub, from, k - |sub|);
+    }
+  }
+  CountAllExtendNoMatch(s, sub, p, p, hi_b);
+}
+
 method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   requires (|a| > 0)
   requires (|b| > 0)
+  requires forall p: nat :: (((p + |a|) <= |str|) ==> ((p + |b|) <= |str|) ==> ((str[p..(p + |a|)] != a) || (str[p..(p + |b|)] != b)))
   ensures (match res { case Some(i_result_val) => (|i_result_val| == 2) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[0] >= 0) && ((i_result_val[0] + |a|) <= |str|)) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[1] >= 0) && ((i_result_val[1] + |b|) <= |str|)) case None => true })
@@ -55,6 +188,8 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
     left := |str|;
     ghost var pushedCount: nat := 0;
     ghost var poppedCount: nat := 0;
+    ghost var aiLowerBound: nat := 0;
+    ghost var biLowerBound: nat := ai + 1;
     while ((i >= 0) && (match result { case Some(i_value) => false case None => true }))
       invariant ((ai == -1) || (((ai >= 0) && ((ai + |a|) <= |str|)) && (str[ai..(ai + |a|)] == a)))
       invariant ((bi == -1) || (((bi >= 0) && ((bi + |b|) <= |str|)) && (str[bi..(bi + |b|)] == b)))
@@ -78,27 +213,71 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       invariant forall j :: 0 <= j < |begs| ==>
                  0 <= begs[j] && begs[j] + |a| <= |str|
                  && str[begs[j]..begs[j] + |a|] == a
-      // Ordering: every pushed entry is <= current scan position, unless the
-      // loop is about to exit (i == -1) with leftover entries — those get
-      // drained by the post-loop fallback that reads `left`/`right`.
-      // (Strict `<` would not hold in general — counterexample: `range("ab",
-      // "a", "aab")` returns [1, 1] via the fallback, because position 1
-      // matches both `a` (str[1..3] == "ab") and `b` (str[1..2] == "a").)
+      // Ordering invariant: every pushed entry is at-or-before current scan
+      // position, with a disjunct for the terminal state where the loop is
+      // about to exit with leftover entries — those get drained by the
+      // post-loop fallback that reads `left`/`right`. (Strict `<` would not
+      // hold in general — counterexample: `range("ab", "a", "aab")` returns
+      // [1, 1] via the fallback, because position 1 matches both `a` (str[1..3]
+      // == "ab") and `b` (str[1..2] == "a").)
       invariant i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
       invariant i == ai || i == bi
       // Algorithmic accounting: stack depth equals net pushes minus pops.
-      // This is the foundation invariant for any Dyck-balanced argument —
-      // it ties the current state of `begs` to a count of branch-1 / branch-2
-      // / branch-3 events the loop has performed.
+      // Foundation for any future Dyck-balanced argument — ties the current
+      // state of `begs` to a count of branch-1 / branch-2 / branch-3 events.
       invariant |begs| == pushedCount - poppedCount
+      // Lower-bound tracking: bi/ai are the result of indexOf with these `from`
+      // values. Combined with the loop-entry pin, lets us deduce biLowerBound
+      // == i_old + 1 at iter 1 (needed for IndexOfMaxAt application).
+      invariant ai == StringIndexOfFromN(str, a, aiLowerBound)
+      invariant bi == StringIndexOfFromN(str, b, biLowerBound)
+      invariant aiLowerBound <= |str|
+      invariant biLowerBound <= |str|
+      // Loop-entry pin: iter 1 is the only iter with |begs| == 0 && result.None.
+      // Pins all counters/bounds to their initial values, so we can transition
+      // cleanly from "vacuous invariant" to "established invariant" on iter 1.
+      invariant |begs| == 0 && result.None? ==> pushedCount == 0
+                                             && poppedCount == 0
+                                             && aiLowerBound == 0
+                                             && biLowerBound == ai + 1
+      // Helper invariants chaining begs[0] to ai/bi for CountAll's precondition.
+      invariant |begs| > 0 && ai >= 0 ==> begs[0] <= ai
+      invariant |begs| > 0 && bi >= 0 ==> begs[0] <= bi
+      // ---- Headline Phase 2 invariants: Dyck-balanced foundation. ----
+      invariant |begs| > 0 ==> pushedCount == CountAll(str, a, begs[0],
+                                if ai >= 0 then ai + |a| - 1 else |str|)
+      invariant |begs| > 0 ==> poppedCount == CountAll(str, b, begs[0],
+                                if bi >= 0 then bi + |b| - 1 else |str|)
       decreases (((match result { case Some(i_result_val) => 0 case None => 1 }) + (if (ai >= 0) then (|str| - ai) else 0)) + (if (bi >= 0) then (|str| - bi) else 0))
     {
       if (i == ai) {
+        ghost var i_old := i;
+        ghost var b0_old := if |begs| > 0 then begs[0] else i;
+        ghost var preEmpty := |begs| == 0;
+        // Pre-body i_old IS an a-position (branch 1 fires when i_old == ai).
+        assert str[i_old..i_old + |a|] == a;
+        assert i_old + |a| <= |str|;
         begs := (begs + [i]);
         pushedCount := pushedCount + 1;
         ai := StringIndexOfFrom(str, a, (i + 1));
+        aiLowerBound := i + 1;
+        assert ai == StringIndexOfFromN(str, a, i_old + 1);
+        assert begs[0] == b0_old;
+        // pushedCount maintenance via single lemma call (no inline forall).
+        CountAllExtendsByOne(str, a, b0_old, i_old);
+        // For iter 1 (preEmpty), also establish poppedCount = 0 invariant.
+        if preEmpty {
+          assert biLowerBound == i_old + 1;
+          assert str[i_old..i_old + |a|] == a;
+          assert i_old + |a| <= |str|;
+          ghost var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
+          if i_old + |b| <= |str| {
+            NoOverlapAtAPos(a, b, str, i_old);
+          }
+          CountAllZeroFromOtherStart(str, b, i_old, biLowerBound, bi, hi_b);
+        }
       } else if (|begs| == 1) {
-        // Branch 2: i === bi (since i !== ai and i is one of ai/bi). bi is a
+        // Branch 2: i === bi (since i != ai and i is one of ai/bi). bi is a
         // valid b-position. The popped element is at index |begs|-1 == 0; the
         // begs invariant gives us its a-position validity.
         assert i == bi;
@@ -115,6 +294,15 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
 
         }
       } else {
+        // Branch 3: i === bi (since i != ai). Pop, advance bi.
+        ghost var bi_old := bi;
+        ghost var i_old := i;
+        ghost var b0_old := if |begs| > 0 then begs[0] else 0;
+        // i_old IS a b-position (branch 3 fires when i != ai, so i == bi).
+        assert i_old == bi_old;
+        assert bi_old >= 0;
+        assert str[bi_old..bi_old + |b|] == b;
+        assert bi_old + |b| <= |str|;
         beg := (if (|begs| > 0) then Some(begs[(|begs| - 1)]) else None);
         ghost var hadElem := |begs| > 0;
         begs := (if (|begs| > 0) then begs[0..(|begs| - 1)] else begs);
@@ -129,6 +317,13 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
 
         }
         bi := StringIndexOfFrom(str, b, (i + 1));
+        biLowerBound := i + 1;
+        // poppedCount maintenance when |begs| stays > 0 (pre-pop |begs| >= 2).
+        if |begs| > 0 {
+          assert begs[0] == b0_old;
+          assert bi == StringIndexOfFromN(str, b, bi_old + 1);
+          CountAllExtendsByOne(str, b, b0_old, bi_old);
+        }
       }
       i := (if ((ai < bi) && (ai >= 0)) then ai else bi);
     }

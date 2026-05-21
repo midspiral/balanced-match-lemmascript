@@ -32,6 +32,7 @@ function StringIndexOfFromN(s: string, sub: string, from: nat): int
 method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   requires (|a| > 0)
   requires (|b| > 0)
+  requires forall p: nat :: (((p + |a|) <= |str|) ==> ((p + |b|) <= |str|) ==> ((str[p..(p + |a|)] != a) || (str[p..(p + |b|)] != b)))
   ensures (match res { case Some(i_result_val) => (|i_result_val| == 2) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[0] >= 0) && ((i_result_val[0] + |a|) <= |str|)) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[1] >= 0) && ((i_result_val[1] + |b|) <= |str|)) case None => true })
