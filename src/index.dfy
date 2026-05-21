@@ -76,9 +76,12 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       invariant forall j :: 0 <= j < |begs| ==>
                  0 <= begs[j] && begs[j] + |a| <= |str|
                  && str[begs[j]..begs[j] + |a|] == a
-      // Ordering invariant: every pushed entry is <= current scan position,
-      // unless the loop is about to exit (i == -1) with leftover entries —
-      // those get drained by the post-loop fallback that reads `left`/`right`.
+      // Ordering: every pushed entry is <= current scan position, unless the
+      // loop is about to exit (i == -1) with leftover entries — those get
+      // drained by the post-loop fallback that reads `left`/`right`.
+      // (Strict `<` would not hold in general — counterexample: `range("ab",
+      // "a", "aab")` returns [1, 1] via the fallback, because position 1
+      // matches both `a` (str[1..3] == "ab") and `b` (str[1..2] == "a").)
       invariant i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
       invariant i == ai || i == bi
       decreases (((match result { case Some(i_result_val) => 0 case None => 1 }) + (if (ai >= 0) then (|str| - ai) else 0)) + (if (bi >= 0) then (|str| - bi) else 0))

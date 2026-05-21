@@ -21,9 +21,21 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
 
 The ordering postcondition is supported by an `i == -1 || forall j, begs[j] <= i` invariant — every pushed entry is at or before the current scan position, with a disjunct for the terminal state where the loop is about to exit with leftover entries.
 
+## What the proof attempt surfaced
+
+Trying to strengthen the ordering to **strict** `result[0] < result[1]` failed — and constructing the counterexample took a single trace:
+
+```
+range("ab", "a", "aab")  ===>  [1, 1]
+```
+
+Walking through: position 1 of `"aab"` matches both `a = "ab"` (since `str[1..3] == "ab"`) and `b = "a"` (since `str[1..2] == "a"`). The algorithm pushes position 1 as an `a`-occurrence, later pops it via the fallback path, and sets both `left := 1` and `right := 1`. The returned `[left, right]` collapses to `[1, 1]`.
+
+This isn't a bug in the algorithm — it's a real edge of the contract. Strict ordering would require a precondition that `a` and `b` don't co-locate any starting positions in `str`, which is non-trivial to state. The `<=` form holds universally.
+
 ## What's not (yet) verified (Phase 2)
 
-- **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Counterexample: `a = "ab"`, `b = "b"`, `str = "ab"` → `range` returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring (and similarly for the `a === b` overlap case). Capturing exactly when non-overlap holds would split the postcondition by a no-shared-character precondition on `a, b`.
+- **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Even simpler counterexample than above: `a = "ab"`, `b = "b"`, `str = "ab"` → returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring. Capturing exactly when non-overlap holds would split the postcondition by a "no shared starts" precondition on `(a, b, str)`.
 - **Dyck-balanced body** — when the returned pair *is* non-overlapping, the substring between `result[0] + a.length` and `result[1]` should be balanced: equal counts of non-overlapping `a` and `b` occurrences with every prefix having `count(a) ≥ count(b)`. This is the headline correctness property (no bracket mismatch hides between the matched pair) and requires a ghost model of the stack tied to substring-occurrence counts.
 - **First-balanced-pair-to-close** — the algorithm has a particular canonical choice (the leftmost `a` whose matching `b` fully closes the run); characterizing this precisely would tighten what callers can rely on.
 - **Fallback path semantics** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned `[left, right]` is the deepest opened-and-closed inner pair. Endpoint validity is verified; *which* pair it is, isn't.
