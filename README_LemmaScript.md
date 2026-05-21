@@ -17,6 +17,7 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0` (plus a `NoOverlap` 
 | **`b` is at `result[1]`** | `str.slice(result[1], result[1] + b.length) === b` — the second index is a valid `b`-occurrence position. |
 | **Ordering** | `result[0] <= result[1]` — the `a`-index is at or before the `b`-index. |
 | **Dyck-balance foundation (Phase 2)** | Under `NoOverlap` (no position of `str` is both an `a`-start and a `b`-start): `pushedCount == CountAll(str, a, begs[0], ai-bound)` and `poppedCount == CountAll(str, b, begs[0], bi-bound)` throughout the loop. The algorithm's per-branch push/pop counts equal the overlapping occurrence counts of `a` and `b` in the substring `str[begs[0]..]` up to the current scan position. |
+| **Body-balance at branch-2 result (Phase 2 headline)** | Whenever `result` is set inside the loop (the branch-2 path — the only path that returns a fully-closed pair), `result[0] < result[1]` (strict) and, when `result[1] + a.length - 1 <= str.length`: `CountAll(str, a, result[0]+1, result[1]+a.length-1) == CountAll(str, b, result[0]+1, result[1]+b.length-1)`. Both sides count overlapping occurrences whose start positions fall in `[result[0]+1, result[1]-1]` — i.e. the inner body of the matched pair has equal `a`- and `b`-counts. Asymmetric upper bounds because `CountAll`'s `hi` is an end-position bound; the start-position range is symmetric. |
 
 The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and the decreases metric); the `.dfy` file adds the proof-only invariants, helper lemmas, and bridging asserts that LS's `\result`-narrowing doesn't reach.
 
@@ -34,13 +35,16 @@ This isn't a bug in the algorithm — it's a real edge of the contract. Strict o
 
 ## Phase 2 proof structure
 
-The Dyck-balance foundation invariants connect the algorithm's *event counts* (each branch-1 push, branch-2 / branch-3 pop) to *substring occurrence counts* in `str`. The proof rests on five pieces:
+The Dyck-balance foundation invariants connect the algorithm's *event counts* (each branch-1 push, branch-2 / branch-3 pop) to *substring occurrence counts* in `str`. The proof rests on six pieces:
 
 1. **`CountAll(s, sub, lo, hi)`** — a ghost function counting overlapping occurrences of `sub` in `s[lo..hi]`. Defined by recursion on `hi` so the recursive case *is* the extension-by-one equation; no separate extension lemma needed beyond what the body computes.
 2. **`IndexOfMaxAt`** — a pointwise maximality lemma: at any position `p` strictly before `StringIndexOfFromN(s, sub, from)`, `sub` does not start at `p`. Avoids the quantifier-trigger trap of stating maximality as a forall in `StringIndexOf`'s postcondition.
 3. **`CountAllExtendNoMatch` / `CountAllExtendOneMatch`** — extension lemmas: extending the upper bound over a range with no new matches (or exactly one) changes `CountAll` by 0 or 1.
-4. **`CountAllExtendsByOne`** — the *single-forall* helper. Given that `s[p..p+|sub|] == sub` and `nextFrom = StringIndexOfFromN(s, sub, p+1)`, it bundles "build the no-match forall over `(matchK, hi_new]` using `IndexOfMaxAt`" and "apply `CountAllExtendOneMatch`" into one lemma. This is the key factoring — the `forall k` block lives in the lemma's body (small context), not in the main method.
-5. **`CountAllZeroFromOtherStart` + `NoOverlapAtAPos`** — for the iter-1 case (first push), establishes `poppedCount == 0 == CountAll(str, b, begs[0], hi_b)` by combining a point-wise NoOverlap fact with `CountAllExtendNoMatch`.
+4. **`CountAllShrinkLo`** — the dual: shrinking `lo` by 1 removes exactly the start position `lo` from the count (contributes 1 if `lo` is a sub-start, else 0). Used to extract `begs[0]`'s contribution at branch-2 result-setting.
+5. **`CountAllExtendsByOne`** — the *single-forall* helper. Given that `s[p..p+|sub|] == sub` and `nextFrom = StringIndexOfFromN(s, sub, p+1)`, it bundles "build the no-match forall over `(matchK, hi_new]` using `IndexOfMaxAt`" and "apply `CountAllExtendOneMatch`" into one lemma. This is the key factoring — the `forall k` block lives in the lemma's body (small context), not in the main method.
+6. **`CountAllZeroFromOtherStart` + `NoOverlapAtAPos`** — for the iter-1 case (first push), establishes `poppedCount == 0 == CountAll(str, b, begs[0], hi_b)` by combining a point-wise NoOverlap fact with `CountAllExtendNoMatch`. `NoOverlapAtAPos` takes the point-wise NoOverlap disjunction as a precondition (rather than the full forall); callers derive it via an explicit `assert str[p..p+|a|] != a || str[p..p+|b|] != b` that pins the verifier's trigger.
+
+The branch-2 result-setting bundles steps 1, 4, 3 (in that order: `ShrinkLo` extracts `begs[0]`, then `ExtendNoMatch` shrinks `hi_a` to `bi+|a|-1`) via a single helper lemma **`BranchTwoBodyBalance`** that keeps the algebra out of the main method's verification context.
 
 Plus three ghost-state additions in the loop:
 
@@ -53,7 +57,7 @@ Plus three ghost-state additions in the loop:
 ## What's not (yet) verified
 
 - **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Counterexample: `a = "ab"`, `b = "b"`, `str = "ab"` → returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring.
-- **Dyck-balance as an `ensures`** — the count-balance is currently a loop invariant tied to ghost counters, not an `ensures` on the returned `[s, e]`. Converting it to an output property would require characterizing `pushedCount == poppedCount` at the moment `result` is set in branch 2 and deriving `CountAll(str, a, s+1, e) == CountAll(str, b, s+1, e)` from the invariants, plus handling the fallback path separately.
+- **Body-balance as a method `ensures` (universal)** — the body-balance equality is now a verified loop invariant for the branch-2 path (see Phase 2 headline row above). Lifting it to a universal method `ensures` (or to a TS `//@ ensures`) still requires proving the same property for the post-loop fallback path, where `result := [left, right]` is set from snapshots taken at an earlier branch-3 iteration. The existing loop invariants are stated relative to `begs[0]` (the bottom of the stack); the fallback snapshot pair `(left, right)` corresponds to some `begs[j]` near the top, so the proof would need per-stack-frame ghost tracking (e.g. `pushedCountAtPush[j]` arrays) rather than the single bottom-frame accounting that suffices for branch-2.
 - **First-balanced-pair-to-close** — the algorithm has a particular canonical choice (the leftmost `a` whose matching `b` fully closes the run); characterizing this precisely would tighten what callers can rely on.
 - **Fallback path semantics** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned `[left, right]` is the deepest opened-and-closed inner pair. Endpoint validity is verified; *which* pair it is, isn't.
 
@@ -85,7 +89,7 @@ Run via the LemmaScript `check.sh` driver in `dafny-slow` mode (which honors per
 Output:
 
 ```
-Dafny program verifier finished with 424 verified, 0 errors
+Dafny program verifier finished with 559 verified, 0 errors
 ```
 
 (The default `check.sh dafny` mode skips this file as gen-check-only because its timeout exceeds the 60s CI threshold.)

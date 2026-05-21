@@ -124,14 +124,91 @@ lemma CountAllExtendsByOne(s: string, sub: string, lo: int, p: int)
   CountAllExtendOneMatch(s, sub, lo, hi_old, matchK, hi_new);
 }
 
-// Instantiate the NoOverlap precondition at a single position (avoids the
-// universal-quantifier instantiation pain at call sites).
+// Shrink CountAll's lower bound by 1: the "lo position contributes 0 or 1"
+// equation, dual to CountAll's hi-recursion. Symbolic: CountAll lo→lo+1
+// removes exactly the start-position `lo` from consideration.
+lemma CountAllShrinkLo(s: string, sub: string, lo: int, hi: int)
+  requires |sub| > 0
+  requires 0 <= lo
+  requires lo + |sub| <= hi <= |s|
+  ensures (if s[lo..lo + |sub|] == sub then 1 else 0)
+       + CountAll(s, sub, lo + 1, hi) == CountAll(s, sub, lo, hi)
+  decreases hi - lo
+{
+  if hi - (lo + 1) < |sub| {
+    // hi == lo + |sub|: only one possible match position (lo itself).
+    assert hi == lo + |sub|;
+  } else {
+    CountAllShrinkLo(s, sub, lo, hi - 1);
+  }
+}
+
+// ====================================================================
+// Branch-2 body-balance helper. Bundles ShrinkLo + NoOverlap + ExtendNoMatch
+// for the result-conditional invariant. Factored as a standalone lemma so
+// the main method's verifier sees a single call, not the assertion pile.
+// ====================================================================
+lemma BranchTwoBodyBalance(a: string, b: string, str: string,
+                           b0: int, bi: int, hi_a: int, hi_b: int,
+                           aiLowerBound: nat, ai: int,
+                           pushedCount: nat, poppedCount: nat)
+  requires |a| > 0 && |b| > 0
+  requires 0 <= b0 && b0 + |a| <= |str| && str[b0..b0 + |a|] == a
+  requires 0 <= bi && bi + |b| <= |str| && str[bi..bi + |b|] == b
+  requires b0 <= bi
+  requires hi_b == bi + |b| - 1
+  requires hi_a == (if ai >= 0 then ai + |a| - 1 else |str|)
+  requires 0 <= hi_a <= |str|
+  requires aiLowerBound <= bi
+  requires aiLowerBound <= |str|
+  requires ai == StringIndexOfFromN(str, a, aiLowerBound)
+  requires ai >= 0 ==> ai >= bi
+  requires pushedCount == CountAll(str, a, b0, hi_a)
+  requires poppedCount == CountAll(str, b, b0, hi_b)
+  requires pushedCount == poppedCount + 1
+  // Point-wise NoOverlap at b0 (caller derives from method's NoOverlap forall).
+  requires str[b0..b0 + |b|] != b
+  ensures b0 < bi
+  ensures bi + |a| - 1 <= |str| ==>
+            CountAll(str, a, b0 + 1, bi + |a| - 1)
+            == CountAll(str, b, b0 + 1, bi + |b| - 1)
+{
+  // Strict ordering: caller's point-wise NoOverlap says str[b0..b0+|b|] != b.
+  // Combined with str[bi..bi+|b|] == b and b0 <= bi: b0 < bi.
+  assert str[b0..b0 + |b|] != b;
+  // ShrinkLo for both sides: b0 IS an a-pos (contributes 1), NOT a b-pos (0).
+  assert b0 + |a| <= hi_a;
+  CountAllShrinkLo(str, a, b0, hi_a);
+  CountAllShrinkLo(str, b, b0, hi_b);
+  // Combined with pushedCount = poppedCount + 1:
+  //   CountAll(str, a, b0+1, hi_a) == CountAll(str, b, b0+1, hi_b).
+  assert CountAll(str, a, b0 + 1, hi_a) == CountAll(str, b, b0 + 1, hi_b);
+
+  if bi + |a| - 1 <= |str| {
+    // Shrink hi_a to bi+|a|-1 via ExtendNoMatch in reverse.
+    // For k in (bi+|a|-1, hi_a] with k >= b0+1+|a|: position p = k-|a| is
+    // in [bi, hi_a-|a|], p >= aiLowerBound (from invariant), so by
+    // IndexOfMaxAt str[p..p+|a|] != a.
+    forall k | bi + |a| - 1 < k <= hi_a && k >= (b0 + 1) + |a|
+      ensures str[k - |a|..k] != a
+    {
+      IndexOfMaxAt(str, a, aiLowerBound, k - |a|);
+    }
+    CountAllExtendNoMatch(str, a, b0 + 1, bi + |a| - 1, hi_a);
+  }
+}
+
+// Instantiate the NoOverlap precondition at a single position.
+// Takes the point-wise NoOverlap disjunction as a precondition; callers
+// derive it from the method's forall via an explicit assert (which gives
+// the verifier a concrete trigger). Avoids passing the unconstrained forall
+// across the lemma boundary, where its no-trigger shape causes brittle
+// instantiation under isolate_assertions.
 lemma NoOverlapAtAPos(a: string, b: string, s: string, p: int)
   requires |a| > 0 && |b| > 0
   requires 0 <= p && p + |a| <= |s| && p + |b| <= |s|
   requires s[p..p + |a|] == a
-  requires forall q: nat :: q + |a| <= |s| ==> q + |b| <= |s| ==>
-                             (s[q..q + |a|] != a || s[q..q + |b|] != b)
+  requires s[p..p + |a|] != a || s[p..p + |b|] != b
   ensures s[p..p + |b|] != b
 { }
 
@@ -243,11 +320,33 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       // Helper invariants chaining begs[0] to ai/bi for CountAll's precondition.
       invariant |begs| > 0 && ai >= 0 ==> begs[0] <= ai
       invariant |begs| > 0 && bi >= 0 ==> begs[0] <= bi
+      // aiLowerBound = (last push position) + 1. The last push happened with
+      // i = ai <= bi (i is min when both >= 0), and by NoOverlap last push != bi,
+      // so last push < bi, hence aiLowerBound <= bi. Needed at branch 2 to apply
+      // IndexOfMaxAt at positions p >= bi.
+      invariant |begs| > 0 && bi >= 0 ==> aiLowerBound <= bi
       // ---- Headline Phase 2 invariants: Dyck-balanced foundation. ----
       invariant |begs| > 0 ==> pushedCount == CountAll(str, a, begs[0],
                                 if ai >= 0 then ai + |a| - 1 else |str|)
       invariant |begs| > 0 ==> poppedCount == CountAll(str, b, begs[0],
                                 if bi >= 0 then bi + |b| - 1 else |str|)
+      // ---- Phase 2 headline ENSURES: body-balance for the returned pair. ----
+      // When result is set, the substring str[r[0]+1 .. r[1]-1] (i.e., the body
+      // between the opening a and closing b, both exclusive) has equal counts
+      // of a-occurrences and b-occurrences. Encoded as CountAll over the
+      // respective end-position upper bounds: r[1]+|a|-1 for a-side (start
+      // positions <= r[1]-1) and r[1]+|b|-1 for b-side (same range, different
+      // end bound because |a| != |b| in general). The conditional on
+      // r[1]+|a|-1 <= |str| handles the edge case where |a| > |b|+1 and r[1]
+      // sits at the right boundary — there the count equality still holds in
+      // spirit, but CountAll's upper-bound precondition forbids stating it.
+      invariant match result {
+        case Some(v) => v[0] < v[1]
+                     && (v[1] + |a| - 1 <= |str| ==>
+                          CountAll(str, a, v[0] + 1, v[1] + |a| - 1)
+                          == CountAll(str, b, v[0] + 1, v[1] + |b| - 1))
+        case None => true
+      }
       decreases (((match result { case Some(i_result_val) => 0 case None => 1 }) + (if (ai >= 0) then (|str| - ai) else 0)) + (if (bi >= 0) then (|str| - bi) else 0))
     {
       if (i == ai) {
@@ -272,6 +371,10 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
           assert i_old + |a| <= |str|;
           ghost var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
           if i_old + |b| <= |str| {
+            // Instantiate the method's NoOverlap forall at q = i_old. The
+            // explicit assert pins the trigger; without it Dafny's auto trigger
+            // selection misses the instantiation under isolate_assertions.
+            assert str[i_old..i_old + |a|] != a || str[i_old..i_old + |b|] != b;
             NoOverlapAtAPos(a, b, str, i_old);
           }
           CountAllZeroFromOtherStart(str, b, i_old, biLowerBound, bi, hi_b);
@@ -284,6 +387,20 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
         assert bi >= 0 && bi + |b| <= |str| && str[bi..bi + |b|] == b;
         assert |begs| > 0;
         assert 0 <= begs[0] && begs[0] + |a| <= |str| && str[begs[0]..begs[0] + |a|] == a;
+        ghost var b0_old := begs[0];
+        ghost var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+        ghost var hi_b := bi + |b| - 1;
+        // Derive the point-wise NoOverlap fact at b0: from str[b0..b0+|a|] == a
+        // (begs invariant) and the method-level NoOverlap forall instantiated
+        // at q=b0, str[b0..b0+|b|] != b. The intermediate disjunction-assert
+        // pins the trigger for Dafny's matching under isolate_assertions.
+        assert b0_old + |b| <= |str|;
+        assert str[b0_old..b0_old + |a|] != a || str[b0_old..b0_old + |b|] != b;
+        assert str[b0_old..b0_old + |b|] != b;
+        // Branch-2 body balance: pushedCount = poppedCount+1, b0 is the only
+        // pushed a-pos still on stack. Helper lemma factors the algebra.
+        BranchTwoBodyBalance(a, b, str, b0_old, bi, hi_a, hi_b,
+                             aiLowerBound, ai, pushedCount, poppedCount);
         var r := (if (|begs| > 0) then Some(begs[(|begs| - 1)]) else None);
         begs := (if (|begs| > 0) then begs[0..(|begs| - 1)] else begs);
         poppedCount := poppedCount + 1;
