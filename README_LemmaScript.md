@@ -21,6 +21,8 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
 
 The ordering postcondition is supported by an `i == -1 || forall j, begs[j] <= i` invariant — every pushed entry is at or before the current scan position, with a disjunct for the terminal state where the loop is about to exit with leftover entries.
 
+The proof also carries an internal **algorithmic accounting** invariant, `|begs| == pushedCount - poppedCount`, via two `ghost var` counters incremented in the push/pop branches. This is a foundation for any future Dyck-balanced argument: it ties the current stack depth to a count of branch-1 vs branch-2/3 events. Not yet exposed as an `ensures` since ghost variables don't survive past the method.
+
 ## What the proof attempt surfaced
 
 Trying to strengthen the ordering to **strict** `result[0] < result[1]` failed — and constructing the counterexample took a single trace:

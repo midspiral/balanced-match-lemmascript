@@ -53,6 +53,8 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
     }
     begs := [];
     left := |str|;
+    ghost var pushedCount: nat := 0;
+    ghost var poppedCount: nat := 0;
     while ((i >= 0) && (match result { case Some(i_value) => false case None => true }))
       invariant ((ai == -1) || (((ai >= 0) && ((ai + |a|) <= |str|)) && (str[ai..(ai + |a|)] == a)))
       invariant ((bi == -1) || (((bi >= 0) && ((bi + |b|) <= |str|)) && (str[bi..(bi + |b|)] == b)))
@@ -84,10 +86,16 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       // matches both `a` (str[1..3] == "ab") and `b` (str[1..2] == "a").)
       invariant i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
       invariant i == ai || i == bi
+      // Algorithmic accounting: stack depth equals net pushes minus pops.
+      // This is the foundation invariant for any Dyck-balanced argument —
+      // it ties the current state of `begs` to a count of branch-1 / branch-2
+      // / branch-3 events the loop has performed.
+      invariant |begs| == pushedCount - poppedCount
       decreases (((match result { case Some(i_result_val) => 0 case None => 1 }) + (if (ai >= 0) then (|str| - ai) else 0)) + (if (bi >= 0) then (|str| - bi) else 0))
     {
       if (i == ai) {
         begs := (begs + [i]);
+        pushedCount := pushedCount + 1;
         ai := StringIndexOfFrom(str, a, (i + 1));
       } else if (|begs| == 1) {
         // Branch 2: i === bi (since i !== ai and i is one of ai/bi). bi is a
@@ -99,6 +107,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
         assert 0 <= begs[0] && begs[0] + |a| <= |str| && str[begs[0]..begs[0] + |a|] == a;
         var r := (if (|begs| > 0) then Some(begs[(|begs| - 1)]) else None);
         begs := (if (|begs| > 0) then begs[0..(|begs| - 1)] else begs);
+        poppedCount := poppedCount + 1;
         match r {
           case Some(i_r_val) =>
             result := Some([i_r_val, bi]);
@@ -107,7 +116,9 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
         }
       } else {
         beg := (if (|begs| > 0) then Some(begs[(|begs| - 1)]) else None);
+        ghost var hadElem := |begs| > 0;
         begs := (if (|begs| > 0) then begs[0..(|begs| - 1)] else begs);
+        if hadElem { poppedCount := poppedCount + 1; }
         match beg {
           case Some(i_beg_val) =>
             if (i_beg_val < left) {
