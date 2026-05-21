@@ -4,7 +4,7 @@ This is a fork of [juliangruber/balanced-match](https://github.com/juliangruber/
 
 `range(a, b, str)` is the stack-based balanced-bracket finder under the public `balanced(a, b, str)` API. Given delimiters like `{` and `}`, it walks `str` left-to-right, pushing every `a`-occurrence onto a stack, popping when it sees a matching `b`, and returns the start/end indices of the first balanced pair to fully close (or, as a fallback when nothing fully closes, the deepest inner pair that did). The algorithm is short but subtle — three branches mutating four interlocking variables, with an early-exit for the degenerate `a === b` case.
 
-## Verified properties (Phase 1)
+## Verified properties
 
 For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
 
@@ -15,15 +15,18 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0`:
 | **Endpoint bounds** | `result[0] >= 0 && result[0] + a.length <= str.length` (and same for `result[1]` / `b`) — both endpoints are in-bounds for slicing. |
 | **`a` is at `result[0]`** | `str.slice(result[0], result[0] + a.length) === a` — the first index is a valid `a`-occurrence position. |
 | **`b` is at `result[1]`** | `str.slice(result[1], result[1] + b.length) === b` — the second index is a valid `b`-occurrence position. |
+| **Ordering** | `result[0] <= result[1]` — the `a`-index is at or before the `b`-index. |
 
-5 Dafny obligations verified, 0 errors. The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and decreases metric); the `.dfy` file adds the proof-only invariants and assertions that LS's `\result`-narrowing doesn't reach (the `match result { case Some(v) => ... }` form for local-variable Option fields).
+5 Dafny verification chunks, 0 errors. The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and the decreases metric); the `.dfy` file adds the proof-only invariants and assertions that LS's `\result`-narrowing doesn't reach (the `match result { case Some(v) => ... }` form for local-variable Option fields).
+
+The ordering postcondition is supported by an `i == -1 || forall j, begs[j] <= i` invariant — every pushed entry is at or before the current scan position, with a disjunct for the terminal state where the loop is about to exit with leftover entries.
 
 ## What's not (yet) verified (Phase 2)
 
-- **Ordering**: `result[0] <= result[1]` — when `a !== b`, the algorithm finds non-overlapping pairs, so the tighter `result[0] + a.length <= result[1]` holds. (The `a === b` early-return *does* allow overlap: e.g. `range("aa", "aa", "aaa")` returns `[0, 1]` with overlap.) Phase 2 will split the postcondition by `a === b`.
-- **Dyck-balanced body** — the substring between `result[0] + a.length` and `result[1]` should have equal counts of non-overlapping `a` and `b` occurrences, with every prefix having `count(a) ≥ count(b)`. This is the headline correctness property (no bracket mismatch hides between the matched pair) and requires a ghost model of the stack.
-- **First-balanced-pair-to-close** — the algorithm has a particular canonical choice; characterizing it precisely would tighten what callers can rely on.
-- **Fallback path** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned pair `[left, right]` is the deepest opened-and-closed inner pair. Phase 1 verifies its endpoint validity; Phase 2 would characterize which pair it is.
+- **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Counterexample: `a = "ab"`, `b = "b"`, `str = "ab"` → `range` returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring (and similarly for the `a === b` overlap case). Capturing exactly when non-overlap holds would split the postcondition by a no-shared-character precondition on `a, b`.
+- **Dyck-balanced body** — when the returned pair *is* non-overlapping, the substring between `result[0] + a.length` and `result[1]` should be balanced: equal counts of non-overlapping `a` and `b` occurrences with every prefix having `count(a) ≥ count(b)`. This is the headline correctness property (no bracket mismatch hides between the matched pair) and requires a ghost model of the stack tied to substring-occurrence counts.
+- **First-balanced-pair-to-close** — the algorithm has a particular canonical choice (the leftmost `a` whose matching `b` fully closes the run); characterizing this precisely would tighten what callers can rely on.
+- **Fallback path semantics** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned `[left, right]` is the deepest opened-and-closed inner pair. Endpoint validity is verified; *which* pair it is, isn't.
 
 `balanced` itself (the regex-accepting wrapper) is out of scope per the project's no-regex rule.
 

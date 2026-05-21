@@ -35,6 +35,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   ensures (match res { case Some(i_result_val) => (|i_result_val| == 2) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[0] >= 0) && ((i_result_val[0] + |a|) <= |str|)) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[1] >= 0) && ((i_result_val[1] + |b|) <= |str|)) case None => true })
+  ensures (match res { case Some(i_result_val) => (i_result_val[0] <= i_result_val[1]) case None => true })
   ensures (match res { case Some(i_result_val) => (str[i_result_val[0]..(i_result_val[0] + |a|)] == a) case None => true })
   ensures (match res { case Some(i_result_val) => (str[i_result_val[1]..(i_result_val[1] + |b|)] == b) case None => true })
 {
@@ -57,10 +58,11 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       invariant ((bi == -1) || (((bi >= 0) && ((bi + |b|) <= |str|)) && (str[bi..(bi + |b|)] == b)))
       invariant ((ai == -1) || (ai >= i))
       invariant ((bi == -1) || (bi >= i))
-      // Phase-1 proof additions:
+      // Proof additions (Phase 1 + ordering):
       invariant match result {
         case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
                                  && 0 <= v[1] && v[1] + |b| <= |str|
+                                 && v[0] <= v[1]
                                  && str[v[0]..v[0] + |a|] == a
                                  && str[v[1]..v[1] + |b|] == b
         case None => true
@@ -68,11 +70,16 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
       invariant match right {
         case Some(r) => 0 <= r && r + |b| <= |str| && str[r..r + |b|] == b
                      && 0 <= left && left + |a| <= |str| && str[left..left + |a|] == a
+                     && left <= r
         case None => true
       }
       invariant forall j :: 0 <= j < |begs| ==>
                  0 <= begs[j] && begs[j] + |a| <= |str|
                  && str[begs[j]..begs[j] + |a|] == a
+      // Ordering invariant: every pushed entry is <= current scan position,
+      // unless the loop is about to exit (i == -1) with leftover entries —
+      // those get drained by the post-loop fallback that reads `left`/`right`.
+      invariant i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
       invariant i == ai || i == bi
       decreases (((match result { case Some(i_result_val) => 0 case None => 1 }) + (if (ai >= 0) then (|str| - ai) else 0)) + (if (bi >= 0) then (|str| - bi) else 0))
     {

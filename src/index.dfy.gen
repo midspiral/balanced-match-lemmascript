@@ -35,6 +35,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   ensures (match res { case Some(i_result_val) => (|i_result_val| == 2) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[0] >= 0) && ((i_result_val[0] + |a|) <= |str|)) case None => true })
   ensures (match res { case Some(i_result_val) => ((i_result_val[1] >= 0) && ((i_result_val[1] + |b|) <= |str|)) case None => true })
+  ensures (match res { case Some(i_result_val) => (i_result_val[0] <= i_result_val[1]) case None => true })
   ensures (match res { case Some(i_result_val) => (str[i_result_val[0]..(i_result_val[0] + |a|)] == a) case None => true })
   ensures (match res { case Some(i_result_val) => (str[i_result_val[1]..(i_result_val[1] + |b|)] == b) case None => true })
 {
