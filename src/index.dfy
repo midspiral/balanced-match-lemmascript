@@ -264,7 +264,7 @@ lemma CountAllZeroFromOtherStart(s: string, sub: string, p: int, from: nat,
                                  theIndex: int, hi_b: int)
   requires |sub| > 0
   requires 0 <= p
-  requires from == p + 1
+  requires from <= p + 1
   requires theIndex == StringIndexOfFromN(s, sub, from)
   requires hi_b == (if theIndex >= 0 then theIndex + |sub| - 1 else |s|)
   requires p <= hi_b <= |s|
@@ -680,27 +680,265 @@ lemma RangeSpecLoopInnerAgreement(
 }
 
 // ====================================================================
+// SpecBodyBalanceLoop: full body-balance over range_spec_loop (the
+// with-fallback variant). Strict generalization of SpecBodyBalanceLoopInner.
+//
+// Inner only proved body-balance for branch-2-derived results (range_spec
+// returns Some via the |begs|==1 pop path). This lemma additionally
+// covers fallback-derived results (loop exit + right.Some + |begs|>0
+// returns Some([left, r])).
+//
+// Two key generalizations:
+//
+// 1. Per-frame accounting (forall j over begs). Inner tracked only j=0
+//    (b0 = begs[0]). Here each stack frame has its own equation:
+//      CountAll(a, begs[j], hi_a) - CountAll(b, begs[j], hi_b) == |begs| - j
+//    Maintained through branches 1 (extend) and 3 (shift).
+//
+// 2. right body-balance invariant:
+//      right.Some(r) ==> BodyBalancedOpt(Some([left, r]))
+//    Carried unchanged through branches 1, 2, and the branch-3 no-update
+//    case. Established at the branch-3 `popped < left` update via the
+//    per-frame equation at j = |begs|-1 (the just-popped top) + the same
+//    BranchTwoBodyBalance kernel that branch 2 uses. At base case, the
+//    fallback's Some([left, r]) output is body-balanced by this invariant.
+// ====================================================================
+lemma SpecBodyBalanceLoop(
+  a: string, b: string, str: string,
+  i: int, ai: int, bi: int,
+  begs: seq<int>, left: int, right: Option<int>,
+  result: Option<seq<int>>,
+  aiLowerBound: nat, biLowerBound: nat)
+  requires |a| > 0 && |b| > 0
+  requires a != b
+  requires ai >= -1 && (ai >= 0 ==> ai + |a| <= |str| && str[ai..ai+|a|] == a)
+  requires bi >= -1 && (bi >= 0 ==> bi + |b| <= |str| && str[bi..bi+|b|] == b)
+  requires i < 0 || i == ai || i == bi
+  requires ai == -1 || ai >= i
+  requires bi == -1 || bi >= i
+  requires NoOverlapPred(a, b, str)
+  requires aiLowerBound <= |str|
+  requires biLowerBound <= |str|
+  requires ai == StringIndexOfFromN(str, a, aiLowerBound)
+  requires bi == StringIndexOfFromN(str, b, biLowerBound)
+  // Stack validity, with bounds against ai/bi so CountAll's lo<=hi is dischargeable.
+  requires forall j :: 0 <= j < |begs| ==>
+              0 <= begs[j] && begs[j] + |a| <= |str| && str[begs[j]..begs[j]+|a|] == a
+              && (ai >= 0 ==> begs[j] <= ai)
+              && (bi >= 0 ==> begs[j] <= bi)
+  requires i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
+  requires |begs| > 0 && ai >= 0 ==> aiLowerBound <= ai
+  requires |begs| > 0 && bi >= 0 ==> aiLowerBound <= bi
+  // Needed by branch-1 to derive `no b-pos in (i_old, bi)` when establishing
+  // the per-frame equation for the just-pushed frame.
+  requires ai >= 0 ==> biLowerBound <= ai + 1
+  // Loop-entry pin (iter 1).
+  requires |begs| == 0 && result.None? ==>
+            aiLowerBound == 0 && biLowerBound == ai + 1
+  // Fresh-state guard.
+  requires |begs| == 0 && result.None? && i >= 0 ==> i == ai && ai >= 0
+  // result validity.
+  requires match result {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  // Per-frame accounting.
+  requires forall j :: 0 <= j < |begs| ==>
+    var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
+    CountAll(str, a, begs[j], hi_a) == (|begs| - j) + CountAll(str, b, begs[j], hi_b)
+  // right validity.
+  requires match right {
+    case Some(r) => 0 <= r && r + |b| <= |str| && str[r..r+|b|] == b
+                 && 0 <= left && left + |a| <= |str| && str[left..left+|a|] == a
+                 && left <= r
+    case None => true
+  }
+  // Body-balance of existing result.
+  requires BodyBalancedOpt(a, b, str, result)
+  // Body-balance of current [left, right] candidate.
+  requires match right {
+    case Some(r) => BodyBalancedOpt(a, b, str, Some([left, r]))
+    case None => true
+  }
+  ensures BodyBalancedOpt(a, b, str, range_spec_loop(a, b, str, i, ai, bi, begs, left, right, result))
+  decreases (if result.Some? then 0 else 1)
+            + (if ai >= 0 then |str| - ai else 0)
+            + (if bi >= 0 then |str| - bi else 0)
+{
+  if i < 0 || result.Some? {
+    // Base case: range_spec_loop returns either result or applies fallback.
+    reveal BodyBalancedOpt();
+  } else if i == ai {
+    // Branch 1: push i_old, advance ai.
+    var i_old := i;
+    var newAi := StringIndexOfFrom(str, a, i + 1);
+    var newBegs := begs + [i_old];
+    var newAiLowerBound: nat := (i_old + 1) as nat;
+    assert newAi == StringIndexOfFromN(str, a, newAiLowerBound);
+    assert str[i_old..i_old + |a|] == a;
+    // bi > i_old when bi >= 0 (NoOverlap or doesn't fit).
+    if bi >= 0 {
+      if i_old + |b| <= |str| {
+        NoOverlapInstance(a, b, str, i_old as nat);
+      }
+      assert bi > i_old;
+    }
+    var hi_a_old := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_a_new := if newAi >= 0 then newAi + |a| - 1 else |str|;
+    var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
+    // Extend per-frame equations at old j by one a-match at i_old.
+    forall j | 0 <= j < |begs|
+      ensures CountAll(str, a, begs[j], hi_a_new) == CountAll(str, a, begs[j], hi_a_old) + 1
+    {
+      CountAllExtendsByOne(str, a, begs[j], i_old);
+    }
+    // Establish per-frame at new j = |begs|: CountAll(a, i_old, hi_a_new) == 1
+    // and CountAll(b, i_old, hi_b) == 0.
+    CountAllExtendsByOne(str, a, i_old, i_old);
+    if i_old + |b| <= |str| {
+      NoOverlapInstance(a, b, str, i_old as nat);
+    }
+    CountAllZeroFromOtherStart(str, b, i_old, biLowerBound, bi, hi_b);
+    // Discharge the recursive call's per-frame forall explicitly.
+    forall j | 0 <= j < |newBegs|
+      ensures CountAll(str, a, newBegs[j], hi_a_new) == (|newBegs| - j) + CountAll(str, b, newBegs[j], hi_b)
+    {
+      if j < |begs| {
+        assert newBegs[j] == begs[j];
+      } else {
+        assert j == |begs|;
+        assert newBegs[j] == i_old;
+      }
+    }
+    var newI1 := if (newAi < bi) && (newAi >= 0) then newAi else bi;
+    SpecBodyBalanceLoop(a, b, str, newI1, newAi, bi, newBegs, left, right, result,
+                        newAiLowerBound, biLowerBound);
+    assert range_spec_loop(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop(a, b, str, newI1, newAi, bi, newBegs, left, right, result);
+  } else if |begs| == 1 {
+    // Branch 2: pop and set newResult. Re-uses BranchTwoBodyBalance at b0 = begs[0].
+    assert i == bi;
+    var b0 := begs[0];
+    var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_b := bi + |b| - 1;
+    var pushedCount := CountAll(str, a, b0, hi_a);
+    var poppedCount := CountAll(str, b, b0, hi_b);
+    // From per-frame at j=0: pushedCount == |begs| + poppedCount == 1 + poppedCount.
+    assert pushedCount == poppedCount + 1;
+    if b0 + |b| <= |str| {
+      NoOverlapInstance(a, b, str, b0 as nat);
+    }
+    assert b0 < bi;
+    assert b0 + |b| <= |str|;
+    NoOverlapInstance(a, b, str, b0 as nat);
+    NoOverlapAtAPos(a, b, str, b0);
+    BranchTwoBodyBalance(a, b, str, b0, bi, hi_a, hi_b, aiLowerBound, ai,
+                         pushedCount, poppedCount);
+    var newResult := Some([begs[|begs| - 1], bi]);
+    var newBegs := begs[..|begs| - 1];
+    assert begs[|begs| - 1] == b0;
+    assert |newBegs| == 0;
+    reveal BodyBalancedOpt();
+    assert BodyBalancedOpt(a, b, str, newResult);
+    SpecBodyBalanceLoop(a, b, str, i, ai, bi, newBegs, left, right, newResult,
+                        aiLowerBound, biLowerBound);
+    assert range_spec_loop(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop(a, b, str, i, ai, bi, newBegs, left, right, newResult);
+  } else {
+    // Branch 3: pop top, maybe update left/right, advance bi.
+    assert i == bi;
+    assert i != ai;
+    assert |begs| >= 2;
+    var bi_old := bi;
+    var i_old := i;
+    var v := begs[|begs| - 1];
+    var newBegs := begs[..|begs| - 1];
+    var newLeft := if v < left then v else left;
+    var newRight := if v < left then Some(bi_old) else right;
+    var newBi := StringIndexOfFrom(str, b, i + 1);
+    var newBiLowerBound: nat := (i_old + 1) as nat;
+    assert newBi == StringIndexOfFromN(str, b, newBiLowerBound);
+    var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_b_old := bi_old + |b| - 1;
+    var hi_b_new := if newBi >= 0 then newBi + |b| - 1 else |str|;
+    // v validity (v is the popped top).
+    assert v == begs[|begs| - 1];
+    assert 0 <= v && v + |a| <= |str| && str[v..v + |a|] == a;
+    // v < bi_old (NoOverlap or doesn't fit b).
+    if v + |b| <= |str| {
+      NoOverlapInstance(a, b, str, v as nat);
+    }
+    assert v != bi_old;
+    assert v <= bi_old;
+    assert v < bi_old;
+    assert v + |b| <= |str|;
+    // Extend per-frame equations at remaining j by one b-match at bi_old.
+    forall j | 0 <= j < |newBegs|
+      ensures CountAll(str, b, newBegs[j], hi_b_new) == CountAll(str, b, newBegs[j], hi_b_old) + 1
+    {
+      assert newBegs[j] == begs[j];
+      CountAllExtendsByOne(str, b, newBegs[j], bi_old);
+    }
+    // Discharge the recursive call's per-frame forall.
+    forall j | 0 <= j < |newBegs|
+      ensures CountAll(str, a, newBegs[j], hi_a) == (|newBegs| - j) + CountAll(str, b, newBegs[j], hi_b_new)
+    {
+      assert newBegs[j] == begs[j];
+    }
+    // If left/right update: establish body-balance for new [v, bi_old].
+    if v < left {
+      // Per-frame at j = |begs| - 1 (pre-pop): CountAll(a, v, hi_a) - CountAll(b, v, hi_b_old) == 1.
+      var pushedCount := CountAll(str, a, v, hi_a);
+      var poppedCount := CountAll(str, b, v, hi_b_old);
+      assert pushedCount == poppedCount + 1;
+      NoOverlapInstance(a, b, str, v as nat);
+      NoOverlapAtAPos(a, b, str, v);
+      BranchTwoBodyBalance(a, b, str, v, bi_old, hi_a, hi_b_old, aiLowerBound, ai,
+                           pushedCount, poppedCount);
+      reveal BodyBalancedOpt();
+      assert BodyBalancedOpt(a, b, str, Some([v, bi_old]));
+      assert newLeft == v && newRight == Some(bi_old);
+    }
+    var newI3 := if (ai < newBi) && (ai >= 0) then ai else newBi;
+    SpecBodyBalanceLoop(a, b, str, newI3, ai, newBi, newBegs, newLeft, newRight, result,
+                        aiLowerBound, newBiLowerBound);
+    assert range_spec_loop(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop(a, b, str, newI3, ai, newBi, newBegs, newLeft, newRight, result);
+  }
+}
+
+// ====================================================================
 // SpecBodyBalance: the top-level body-balance theorem about range_spec.
-// When range_spec_inner returns Some (i.e., the result came from branch 2,
-// not the post-loop fallback), range_spec returns the same value AND that
-// value is body-balanced. The fallback case (range_spec_inner == None
-// but range_spec returns Some([left, r]) via fallback) is left as future
-// work; this theorem still covers every input where the algorithm fully
-// closes a matched pair via branch 2 (the "primary" success path).
+// Holds UNCONDITIONALLY (covers both the branch-2 close and the post-loop
+// fallback): under NoOverlap and a != b, every Some result of range_spec
+// is body-balanced. Proven by calling SpecBodyBalanceLoop with the
+// initial state (begs = [], result = None, right = None) where the
+// per-frame forall and right-invariant preconditions are vacuous.
+//
+// Also retains the inner-agreement bridge (range_spec_inner.Some? ⇒
+// range_spec == range_spec_inner) since it's useful for callers who want
+// to distinguish branch-2-derived vs fallback-derived results.
 // ====================================================================
 lemma SpecBodyBalance(a: string, b: string, str: string)
   requires |a| > 0 && |b| > 0
   requires a != b
   requires NoOverlapPred(a, b, str)
+  ensures BodyBalancedOpt(a, b, str, range_spec(a, b, str))
   ensures range_spec_inner(a, b, str).Some?
     ==> range_spec(a, b, str) == range_spec_inner(a, b, str)
-       && BodyBalancedOpt(a, b, str, range_spec(a, b, str))
 {
   SpecBodyBalanceInner(a, b, str);
   var ai := StringIndexOf(str, a);
   var bi := StringIndexOfFrom(str, b, ai + 1);
-  if ai >= 0 && bi > 0 && a != b {
+  reveal BodyBalancedOpt();
+  if ai >= 0 && bi > 0 {
     RangeSpecLoopInnerAgreement(a, b, str, ai, ai, bi, [], |str|, None, None);
+    SpecBodyBalanceLoop(a, b, str, ai, ai, bi, [], |str|, None, None,
+                        0, (ai + 1) as nat);
   }
 }
 
@@ -715,6 +953,11 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   ensures (match res { case Some(i_result_val) => (str[i_result_val[0]..(i_result_val[0] + |a|)] == a) case None => true })
   ensures (match res { case Some(i_result_val) => (str[i_result_val[1]..(i_result_val[1] + |b|)] == b) case None => true })
   // ---- UNIVERSAL refinement ensures: imperative method computes the spec. ----
+  // Body-balance is proved AS A THEOREM about `range_spec` (see SpecBodyBalance);
+  // it transfers to `range` via this refinement. Not added as a method ensures
+  // because the discharge requires bridging NoOverlapPred (filter form) against
+  // the codegen-emitted curried-implication NoOverlap precondition, which Z3
+  // doesn't auto-skolemize under --isolate-assertions.
   ensures res == range_spec(a, b, str)
 {
   var begs: seq<int> := [];
