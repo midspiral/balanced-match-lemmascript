@@ -212,6 +212,50 @@ lemma NoOverlapAtAPos(a: string, b: string, s: string, p: int)
   ensures s[p..p + |b|] != b
 { }
 
+// ====================================================================
+// NoOverlapPred: opaque-style predicate wrapping the method's NoOverlap
+// forall. Used in body-balance lemmas so the precondition is a single
+// boolean fact (passes through recursive calls trivially) rather than a
+// triggerless forall (which Dafny struggles to discharge across calls).
+// Use NoOverlapInstance below to extract a per-position disjunction.
+// ====================================================================
+ghost predicate NoOverlapPred(a: string, b: string, s: string)
+{
+  forall p: nat | p + |a| <= |s| && p + |b| <= |s|
+    :: s[p..p+|a|] != a || s[p..p+|b|] != b
+}
+
+// ====================================================================
+// BodyBalancedOpt: body-balance predicate over an Option<seq<int>> result.
+// Opaque (Dafny treats as a black box outside its own definition) so the
+// ensures of large lemmas reduces to a single boolean fact, not a CountAll
+// comparison that triggers a verifier blowup at the function boundary.
+// ====================================================================
+ghost predicate {:opaque} BodyBalancedOpt(a: string, b: string, str: string, v: Option<seq<int>>)
+  requires |a| > 0 && |b| > 0
+{
+  match v {
+    case Some(p) =>
+      (|p| == 2 && 0 <= p[0] && 0 <= p[1]
+       && p[1] + |a| - 1 <= |str| && p[1] + |b| - 1 <= |str|
+       && p[0] + 1 <= p[1] + |a| - 1
+       && p[0] + 1 <= p[1] + |b| - 1)
+      ==> CountAll(str, a, p[0]+1, p[1]+|a|-1)
+          == CountAll(str, b, p[0]+1, p[1]+|b|-1)
+    case None => true
+  }
+}
+
+// Extract the per-position no-overlap fact at a single p. The trigger
+// happens here (in the lemma body), not at the call site.
+lemma NoOverlapInstance(a: string, b: string, s: string, p: nat)
+  requires NoOverlapPred(a, b, s)
+  requires p + |a| <= |s|
+  requires p + |b| <= |s|
+  ensures s[p..p+|a|] != a || s[p..p+|b|] != b
+{
+}
+
 // "When p has no sub-start, CountAll(s, sub, p, hi_b) == 0 where hi_b extends
 // up to the next sub-position via indexOf." Takes the point-wise no-overlap
 // fact as a precondition (caller instantiates NoOverlap separately) — avoids
@@ -302,6 +346,362 @@ function range_spec(a: string, b: string, str: string): Option<seq<int>>
     if a == b then Some([ai, bi])
     else range_spec_loop(a, b, str, ai, ai, bi, [], |str|, None, None)
   else None
+}
+
+// ====================================================================
+// Inner-only spec: identical to range_spec_loop except the loop-exit
+// base case returns `result` directly (no fallback). Used as the target
+// of the body-balance theorem — the fallback path is left as future
+// work, but every branch-2-derived result of range_spec_loop is
+// captured here. Lemma `RangeSpecInnerAgreement` below shows that
+// when range_spec_loop_inner returns Some, range_spec_loop returns
+// the same Some (i.e., inner.Some ⇒ outer == inner).
+// ====================================================================
+function range_spec_loop_inner(a: string, b: string, str: string,
+                                i: int, ai: int, bi: int,
+                                begs: seq<int>, left: int, right: Option<int>,
+                                result: Option<seq<int>>): Option<seq<int>>
+  requires |a| > 0 && |b| > 0
+  requires ai >= -1 && (ai >= 0 ==> ai + |a| <= |str| && str[ai..ai+|a|] == a)
+  requires bi >= -1 && (bi >= 0 ==> bi + |b| <= |str| && str[bi..bi+|b|] == b)
+  requires i < 0 || i == ai || i == bi
+  requires forall j :: 0 <= j < |begs| ==>
+              0 <= begs[j] && begs[j] + |a| <= |str| && str[begs[j]..begs[j]+|a|] == a
+  requires match result {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  ensures match range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result) {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  decreases (if result.Some? then 0 else 1)
+            + (if ai >= 0 then |str| - ai else 0)
+            + (if bi >= 0 then |str| - bi else 0)
+{
+  if i < 0 || result.Some? then
+    result  // no fallback
+  else if i == ai then
+    var newAi := StringIndexOfFrom(str, a, i + 1);
+    var newI := if (newAi < bi) && (newAi >= 0) then newAi else bi;
+    range_spec_loop_inner(a, b, str, newI, newAi, bi, begs + [i], left, right, result)
+  else if |begs| == 1 then
+    var newResult := Some([begs[|begs| - 1], bi]);
+    var newBegs := begs[..|begs| - 1];
+    range_spec_loop_inner(a, b, str, i, ai, bi, newBegs, left, right, newResult)
+  else
+    var beg := if |begs| > 0 then Some(begs[|begs| - 1]) else None;
+    var newBegs := if |begs| > 0 then begs[..|begs| - 1] else begs;
+    var (newLeft, newRight) := match beg {
+      case Some(v) => if v < left then (v, Some(bi)) else (left, right)
+      case None => (left, right)
+    };
+    var newBi := StringIndexOfFrom(str, b, i + 1);
+    var newI := if (ai < newBi) && (ai >= 0) then ai else newBi;
+    range_spec_loop_inner(a, b, str, newI, ai, newBi, newBegs, newLeft, newRight, result)
+}
+
+function range_spec_inner(a: string, b: string, str: string): Option<seq<int>>
+  requires |a| > 0 && |b| > 0
+{
+  var ai := StringIndexOf(str, a);
+  var bi := StringIndexOfFrom(str, b, ai + 1);
+  if ai >= 0 && bi > 0 then
+    if a == b then Some([ai, bi])
+    else range_spec_loop_inner(a, b, str, ai, ai, bi, [], |str|, None, None)
+  else None
+}
+
+// ====================================================================
+// SpecBodyBalanceLoopInner: inductive lemma about range_spec_loop_inner
+// (the no-fallback variant). Threads CountAll-based accounting through
+// the recursion and concludes body-balance for any Some result.
+//
+// Since range_spec_loop_inner returns None at loop exit (no fallback),
+// every Some result must come from branch 2 setting result := Some(...).
+// Body-balance for that result reduces to BranchTwoBodyBalance.
+// ====================================================================
+lemma SpecBodyBalanceLoopInner(
+  a: string, b: string, str: string,
+  i: int, ai: int, bi: int,
+  begs: seq<int>, left: int, right: Option<int>,
+  result: Option<seq<int>>,
+  b0: int, aiLowerBound: nat, biLowerBound: nat)
+  requires |a| > 0 && |b| > 0
+  requires a != b
+  requires ai >= -1 && (ai >= 0 ==> ai + |a| <= |str| && str[ai..ai+|a|] == a)
+  requires bi >= -1 && (bi >= 0 ==> bi + |b| <= |str| && str[bi..bi+|b|] == b)
+  requires i < 0 || i == ai || i == bi
+  requires ai == -1 || ai >= i
+  requires bi == -1 || bi >= i
+  requires NoOverlapPred(a, b, str)
+  requires aiLowerBound <= |str|
+  requires biLowerBound <= |str|
+  requires ai == StringIndexOfFromN(str, a, aiLowerBound)
+  requires bi == StringIndexOfFromN(str, b, biLowerBound)
+  requires forall j :: 0 <= j < |begs| ==>
+              0 <= begs[j] && begs[j] + |a| <= |str| && str[begs[j]..begs[j]+|a|] == a
+  requires i == -1 || forall j :: 0 <= j < |begs| ==> begs[j] <= i
+  requires |begs| > 0 ==> begs[0] == b0
+  requires |begs| > 0 ==> 0 <= b0 && b0 + |a| <= |str| && str[b0..b0+|a|] == a
+  requires |begs| > 0 && ai >= 0 ==> b0 <= ai && aiLowerBound <= ai
+  requires |begs| > 0 && bi >= 0 ==> b0 <= bi && aiLowerBound <= bi
+  // Loop-entry pin: fresh state ⇒ counters at initial values.
+  requires |begs| == 0 && result.None? ==>
+            aiLowerBound == 0 && biLowerBound == ai + 1
+  // Fresh-state guard: if no pushes yet and i is non-negative, i must be ai
+  // (branch 1 is what fires from iter 1). Rules out branch 3 with |begs|==0.
+  requires |begs| == 0 && result.None? && i >= 0 ==> i == ai && ai >= 0
+  // result validity (when Some)
+  requires match result {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  // Accounting: |begs| equals CountAll(a, b0, hi_a) - CountAll(b, b0, hi_b).
+  requires |begs| > 0 ==>
+    var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
+    CountAll(str, a, b0, hi_a) == |begs| + CountAll(str, b, b0, hi_b)
+  // Body-balance of existing result.
+  requires BodyBalancedOpt(a, b, str, result)
+  ensures BodyBalancedOpt(a, b, str, range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result))
+  decreases (if result.Some? then 0 else 1)
+            + (if ai >= 0 then |str| - ai else 0)
+            + (if bi >= 0 then |str| - bi else 0)
+{
+  if i < 0 || result.Some? {
+    // Base case: returns result. Body-balance carried by precondition.
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result) == result;
+  } else if i == ai {
+    // Branch 1: push i, advance ai.
+    var i_old := i;
+    var newAi := StringIndexOfFrom(str, a, i + 1);
+    var newBegs := begs + [i_old];
+    var newB0 := if |begs| > 0 then b0 else i_old;
+    var newAiLowerBound: nat := (i_old + 1) as nat;
+    assert newAi == StringIndexOfFromN(str, a, newAiLowerBound);
+    assert str[i_old..i_old + |a|] == a;
+    assert i_old + |a| <= |str|;
+    // Establish bi > i_old (when bi >= 0), needed for recursive call's
+    // newAiLowerBound = i_old + 1 <= bi precondition. Argument: bi is a
+    // b-pos, i_old is an a-pos but not a b-pos (NoOverlap or doesn't fit).
+    if bi >= 0 {
+      if i_old + |b| <= |str| {
+        NoOverlapInstance(a, b, str, i_old as nat);
+        // str[i_old..i_old+|b|] != b
+      }
+      assert bi != i_old;  // bi b-pos, i_old not b-pos (or doesn't fit)
+      assert bi > i_old;
+    }
+    if |begs| > 0 {
+      // Maintain accounting: extend hi_a by one a-match at i_old.
+      CountAllExtendsByOne(str, a, b0, i_old);
+      // CountAll(b, b0, hi_b) unchanged.
+    } else {
+      // Iter 1: establish accounting fresh. newB0 == i_old.
+      // CountAll(a, i_old, new_hi_a) = 1 (only push at i_old).
+      CountAllExtendsByOne(str, a, i_old, i_old);
+      // CountAll(b, i_old, hi_b) = 0: no b can start at i_old (NoOverlap) or in (i_old, bi).
+      var hi_b := if bi >= 0 then bi + |b| - 1 else |str|;
+      assert biLowerBound == i_old + 1;  // from pin
+      if i_old + |b| <= |str| {
+        NoOverlapInstance(a, b, str, i_old as nat);
+      }
+      CountAllZeroFromOtherStart(str, b, i_old, biLowerBound, bi, hi_b);
+    }
+    SpecBodyBalanceLoopInner(a, b, str,
+                              if (newAi < bi) && (newAi >= 0) then newAi else bi,
+                              newAi, bi, newBegs, left, right, result,
+                              newB0, newAiLowerBound, biLowerBound);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str,
+                                  if (newAi < bi) && (newAi >= 0) then newAi else bi,
+                                  newAi, bi, newBegs, left, right, result);
+  } else if |begs| == 1 {
+    // Branch 2: pop and set newResult.
+    assert i == bi;
+    var hi_a := if ai >= 0 then ai + |a| - 1 else |str|;
+    var hi_b := bi + |b| - 1;
+    var pushedCount := CountAll(str, a, b0, hi_a);
+    var poppedCount := CountAll(str, b, b0, hi_b);
+    // From accounting: CountAll(a, b0, hi_a) == 1 + CountAll(b, b0, hi_b).
+    assert pushedCount == poppedCount + 1;
+    // Derive b0 < bi: b0 is a-pos, bi is b-pos. If b0 + |b| <= |str|, NoOverlap
+    // at b0 gives str[b0..b0+|b|] != b. If b0 + |b| > |str|, b0 doesn't fit b.
+    // Either way, b0 != bi (bi is a b-pos).
+    if b0 + |b| <= |str| {
+      NoOverlapInstance(a, b, str, b0 as nat);
+    }
+    assert b0 != bi;
+    assert b0 < bi;
+    assert b0 + |b| <= |str|;  // from b0 < bi and bi + |b| <= |str|
+    // Now apply NoOverlap at b0 (with b0 + |b| <= |str| confirmed) and BranchTwoBodyBalance.
+    NoOverlapInstance(a, b, str, b0 as nat);
+    NoOverlapAtAPos(a, b, str, b0);
+    BranchTwoBodyBalance(a, b, str, b0, bi, hi_a, hi_b, aiLowerBound, ai,
+                         pushedCount, poppedCount);
+    var newResult := Some([begs[|begs| - 1], bi]);
+    var newBegs := begs[..|begs| - 1];
+    assert begs[|begs| - 1] == b0;
+    assert |newBegs| == 0;
+    // Establish BodyBalancedOpt for newResult: BranchTwoBodyBalance gave us the
+    // CountAll equality under the bi + |a| - 1 <= |str| guard.
+    reveal BodyBalancedOpt();
+    assert BodyBalancedOpt(a, b, str, newResult);
+    SpecBodyBalanceLoopInner(a, b, str, i, ai, bi, newBegs, left, right, newResult,
+                              b0, aiLowerBound, biLowerBound);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str, i, ai, bi, newBegs, left, right, newResult);
+  } else {
+    // Branch 3: pop or no-op, advance bi.
+    assert i == bi;
+    assert i != ai;
+    var bi_old := bi;
+    var i_old := i;
+    var beg := if |begs| > 0 then Some(begs[|begs| - 1]) else None;
+    var newBegs := if |begs| > 0 then begs[..|begs| - 1] else begs;
+    var newLeftRight := match beg {
+      case Some(v) => if v < left then (v, Some(bi_old)) else (left, right)
+      case None => (left, right)
+    };
+    var newLeft := newLeftRight.0;
+    var newRight := newLeftRight.1;
+    var newBi := StringIndexOfFrom(str, b, i + 1);
+    var newBiLowerBound: nat := (i_old + 1) as nat;
+    assert newBi == StringIndexOfFromN(str, b, newBiLowerBound);
+    // |begs| != 1 and i == bi ≠ ai. Also pin precondition rules out |begs| == 0
+    // unless ai == -1. But i == bi here, so if |begs|==0, fresh-state guard forces
+    // i == ai, contradicting i != ai. So |begs| >= 2.
+    assert |begs| >= 2;
+    // Maintain accounting after pop and bi advance.
+    CountAllExtendsByOne(str, b, b0, bi_old);
+    assert newBegs[0] == b0;
+    SpecBodyBalanceLoopInner(a, b, str,
+                              if (ai < newBi) && (ai >= 0) then ai else newBi,
+                              ai, newBi, newBegs, newLeft, newRight, result,
+                              b0, aiLowerBound, newBiLowerBound);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str,
+                                  if (ai < newBi) && (ai >= 0) then ai else newBi,
+                                  ai, newBi, newBegs, newLeft, newRight, result);
+  }
+}
+
+// ====================================================================
+// SpecBodyBalanceInner: top-level wrapper. For any input satisfying
+// NoOverlap and a != b, any Some result of range_spec_inner is
+// body-balanced. The accounting starts fresh at b0 = 0, aiLowerBound = 0,
+// biLowerBound = ai + 1 (initial-pin state).
+// ====================================================================
+lemma SpecBodyBalanceInner(a: string, b: string, str: string)
+  requires |a| > 0 && |b| > 0
+  requires a != b
+  requires NoOverlapPred(a, b, str)
+  ensures BodyBalancedOpt(a, b, str, range_spec_inner(a, b, str))
+{
+  var ai := StringIndexOf(str, a);
+  var bi := StringIndexOfFrom(str, b, ai + 1);
+  if ai >= 0 && bi > 0 {
+    // a != b, so a == b case is excluded; range_spec_inner delegates to range_spec_loop_inner.
+    reveal BodyBalancedOpt();
+    SpecBodyBalanceLoopInner(a, b, str, ai, ai, bi, [], |str|, None, None,
+                              0, 0, (ai + 1) as nat);
+  } else {
+    // range_spec_inner returns None; body-balance vacuous.
+    reveal BodyBalancedOpt();
+  }
+}
+
+// ====================================================================
+// RangeSpecLoopInnerAgreement: when the inner spec returns Some, the
+// outer (range_spec_loop) returns the same Some. The two functions only
+// differ at loop-exit base case: inner returns `result`, outer applies
+// fallback. So inner.Some ⇒ result.Some at base case ⇒ outer == result.
+// ====================================================================
+lemma RangeSpecLoopInnerAgreement(
+  a: string, b: string, str: string,
+  i: int, ai: int, bi: int,
+  begs: seq<int>, left: int, right: Option<int>,
+  result: Option<seq<int>>)
+  requires |a| > 0 && |b| > 0
+  requires ai >= -1 && (ai >= 0 ==> ai + |a| <= |str| && str[ai..ai+|a|] == a)
+  requires bi >= -1 && (bi >= 0 ==> bi + |b| <= |str| && str[bi..bi+|b|] == b)
+  requires i < 0 || i == ai || i == bi
+  requires forall j :: 0 <= j < |begs| ==>
+              0 <= begs[j] && begs[j] + |a| <= |str| && str[begs[j]..begs[j]+|a|] == a
+  requires match result {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  ensures range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result).Some?
+    ==> range_spec_loop(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+  decreases (if result.Some? then 0 else 1)
+            + (if ai >= 0 then |str| - ai else 0)
+            + (if bi >= 0 then |str| - bi else 0)
+{
+  if i < 0 || result.Some? {
+    // Base case: inner returns result. If inner.Some?, then result.Some?
+    // (only way inner returns Some at base case). Outer's base case with
+    // result.Some? also returns result. So they agree.
+  } else if i == ai {
+    var newAi := StringIndexOfFrom(str, a, i + 1);
+    var newI := if (newAi < bi) && (newAi >= 0) then newAi else bi;
+    RangeSpecLoopInnerAgreement(a, b, str, newI, newAi, bi, begs + [i], left, right, result);
+  } else if |begs| == 1 {
+    var newResult := Some([begs[|begs|-1], bi]);
+    var newBegs := begs[..|begs|-1];
+    RangeSpecLoopInnerAgreement(a, b, str, i, ai, bi, newBegs, left, right, newResult);
+  } else {
+    var beg := if |begs| > 0 then Some(begs[|begs|-1]) else None;
+    var newBegs := if |begs| > 0 then begs[..|begs|-1] else begs;
+    var newLeftRight := match beg {
+      case Some(v) => if v < left then (v, Some(bi)) else (left, right)
+      case None => (left, right)
+    };
+    var newLeft := newLeftRight.0;
+    var newRight := newLeftRight.1;
+    var newBi := StringIndexOfFrom(str, b, i + 1);
+    var newI := if (ai < newBi) && (ai >= 0) then ai else newBi;
+    RangeSpecLoopInnerAgreement(a, b, str, newI, ai, newBi, newBegs, newLeft, newRight, result);
+  }
+}
+
+// ====================================================================
+// SpecBodyBalance: the top-level body-balance theorem about range_spec.
+// When range_spec_inner returns Some (i.e., the result came from branch 2,
+// not the post-loop fallback), range_spec returns the same value AND that
+// value is body-balanced. The fallback case (range_spec_inner == None
+// but range_spec returns Some([left, r]) via fallback) is left as future
+// work; this theorem still covers every input where the algorithm fully
+// closes a matched pair via branch 2 (the "primary" success path).
+// ====================================================================
+lemma SpecBodyBalance(a: string, b: string, str: string)
+  requires |a| > 0 && |b| > 0
+  requires a != b
+  requires NoOverlapPred(a, b, str)
+  ensures range_spec_inner(a, b, str).Some?
+    ==> range_spec(a, b, str) == range_spec_inner(a, b, str)
+       && BodyBalancedOpt(a, b, str, range_spec(a, b, str))
+{
+  SpecBodyBalanceInner(a, b, str);
+  var ai := StringIndexOf(str, a);
+  var bi := StringIndexOfFrom(str, b, ai + 1);
+  if ai >= 0 && bi > 0 && a != b {
+    RangeSpecLoopInnerAgreement(a, b, str, ai, ai, bi, [], |str|, None, None);
+  }
 }
 
 method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
