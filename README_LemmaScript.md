@@ -20,6 +20,7 @@ For any inputs `a`, `b` with `a.length > 0 && b.length > 0` (plus a `NoOverlap` 
 | **Behavioral equivalence with a functional spec (Phase 3 headline, universal)** | `range(a, b, str) == range_spec(a, b, str)` for *every* input — both the branch-2 fully-closed-pair path and the post-loop fallback. `range_spec` is a pure recursive Dafny function: each of the imperative algorithm's three branches becomes a recursive case; the loop exit + fallback is the function's base case. The imperative method's loop carries a single bridging invariant `range_spec_loop(current state) == specFinal` (where `specFinal` is the spec's value computed at loop entry); each iteration's body matches exactly one recursive case of `range_spec_loop`, so the invariant is maintained by direct unfolding — no per-stack-frame counting, no `forall j` over `CountAll`. This is strictly stronger than any single-property claim: any property of `range_spec` (a pure function, separately analyzable) automatically transfers to the imperative `range`. |
 | **Body-balance, branch-2-derived results (Phase 4)** | When `range_spec_inner` (a no-fallback variant of the spec) returns Some, the returned pair is body-balanced. `SpecBodyBalanceInner` proves this by induction on `range_spec_loop_inner`'s recursive structure, with single-frame CountAll accounting (only `b0 = begs[0]`) threaded as a ghost parameter. Subsumed by Phase 5 (kept as an intermediate result and as the substrate `BranchTwoBodyBalance` reused by Phase 5). |
 | **Body-balance, unconditional (Phase 5 headline)** | Strict generalization. For *every* Some result of `range_spec(a, b, str)` — branch-2-derived OR post-loop-fallback-derived — the interior is Dyck-balanced: `CountAll(str, a, s+1, e+\|a\|-1) == CountAll(str, b, s+1, e+\|b\|-1)`. `SpecBodyBalance(a, b, str)` is the unconditional top-level theorem, packaged as `BodyBalancedOpt(a, b, str, range_spec(a, b, str))`. Two strict generalizations over Phase 4: **per-frame accounting** (`forall j` over `begs`, not just `j=0`) and a **`right.Some(r) ⇒ BodyBalancedOpt(Some([left, r]))`** invariant carried through branches and established at branch 3's `popped < left` update via `BranchTwoBodyBalance` applied at the just-popped top frame. |
+| **First-balanced-pair-to-close (Phase 6)** | When `range_spec_inner(a, b, str)` returns Some — the branch-2 fully-closed path, where the algorithm finds a matching pair — the returned pair's first component is `StringIndexOf(str, a)`, the **leftmost** `a`-occurrence in `str`. `FirstBalancedPair(a, b, str)` proves this; the inductive heart `FirstBalancedPairLoopInner` carries an invariant `\|begs\| > 0 ==> begs[0] == initialAi` (where `initialAi` is the original `StringIndexOf(str, a)`). The bottom of the stack is invariantly the first push, fired at iter 1 from the fresh-state `i == ai == initialAi`. Branch 3 pops only when `\|begs\| >= 2` so never touches `begs[0]`; branch 2 (`\|begs| == 1`) emits `Some([begs[0], bi])`, transferring the witness to the result. |
 
 The TS annotations carry the contract (`requires`/`ensures` on `range`, plus loop invariants and the decreases metric); the `.dfy` file adds the proof-only invariants, helper lemmas, and bridging asserts that LS's `\result`-narrowing doesn't reach.
 
@@ -34,6 +35,17 @@ range("ab", "a", "aab")  ===>  [1, 1]
 Walking through: position 1 of `"aab"` matches both `a = "ab"` (since `str[1..3] == "ab"`) and `b = "a"` (since `str[1..2] == "a"`). The algorithm pushes position 1 as an `a`-occurrence, later pops it via the fallback path, and sets both `left := 1` and `right := 1`. The returned `[left, right]` collapses to `[1, 1]`.
 
 This isn't a bug in the algorithm — it's a real edge of the contract. Strict ordering would require a precondition that `a` and `b` don't co-locate any starting positions in `str`, which is exactly the `NoOverlap` precondition the Phase 2 invariants depend on.
+
+## Phase 6 proof structure (first-balanced-pair-to-close)
+
+`FirstBalancedPair(a, b, str)` — when `range_spec_inner` returns a Some pair, its first component is `StringIndexOf(str, a)`. Proof is a single inductive invariant: `|begs| > 0 ==> begs[0] == initialAi`, threaded as a ghost parameter through `FirstBalancedPairLoopInner`. Maintained because:
+
+- **Iter-1 push** (branch 1 with `|begs| == 0`): fresh-state guard gives `i == ai == initialAi`, so newBegs[0] = i = initialAi.
+- **Non-iter-1 push** (branch 1 with `|begs| > 0`): appends at the end, doesn't change begs[0].
+- **Branch 3 pop**: only fires when `|begs| >= 2`, pops the top, never touches begs[0].
+- **Branch 2** (`|begs| == 1`): pops the only element and sets `result := Some([begs[0], bi])` = `Some([initialAi, bi])`. The witness moves from the stack invariant into the result invariant.
+
+Much simpler than Phase 5 — no `CountAll`, no per-frame anything, just identity tracking on `begs[0]`. The branch-3 case requires `|begs| >= 1` (or vacuously empty); both preserve `begs[0]` cleanly.
 
 ## Phase 5 proof structure (unconditional body-balance)
 
@@ -97,7 +109,6 @@ Plus three ghost-state additions in the loop:
 
 - **Strict non-overlap** `result[0] + a.length <= result[1]` — does NOT hold in general. Counterexample: `a = "ab"`, `b = "b"`, `str = "ab"` → returns `[0, 1]` with `0 + 2 > 1`. The algorithm allows the `b`-substring to start inside the `a`-substring.
 - **Body-balance as a method-level `ensures` on `range`** — `BodyBalancedOpt(range(...))` is implied by the existing `res == range_spec(a, b, str)` ensures plus `SpecBodyBalance`, so callers can derive it. It isn't packaged directly on the method because discharging `SpecBodyBalance`'s `NoOverlapPred(a, b, str)` precondition from the codegen-emitted curried-implication NoOverlap precondition trips Z3 trigger walls under `--isolate-assertions`.
-- **First-balanced-pair-to-close** — the algorithm has a particular canonical choice (the leftmost `a` whose matching `b` fully closes the run); characterizing this precisely would tighten what callers can rely on.
 - **Fallback path semantics** — when the loop exits with non-empty `begs` and `right !== undefined`, the returned `[left, right]` is the deepest opened-and-closed inner pair. Endpoint validity is verified; *which* pair it is, isn't.
 
 `balanced` itself (the regex-accepting wrapper) is out of scope per the project's no-regex rule.
@@ -128,7 +139,7 @@ Run via the LemmaScript `check.sh` driver in `dafny-slow` mode (which honors per
 Output:
 
 ```
-Dafny program verifier finished with 1946 verified, 0 errors
+Dafny program verifier finished with 2233 verified, 0 errors
 ```
 
 (One pre-existing `pushedCount == CountAll(...)` invariant maintenance VC is flaky around the 500s budget; it discharges on most runs but may report 1 timeout. The proof is structurally sound — see DUMP2 pitfall 4 for the underlying Z3 sensitivity, which predates Phase 5.)
@@ -145,7 +156,7 @@ src/
 LemmaScript-files.txt ← Registers index.ts with the 500s --isolate-assertions config
 ```
 
-The diff between `index.dfy.gen` and `index.dfy` is additions-only — the spec functions (`range_spec`, `range_spec_loop`, plus the no-fallback variants `range_spec_inner` and `range_spec_loop_inner` introduced by Phase 4), proof-only lemmas (`CountAll`, `IndexOfMaxAt`, `CountAllExtend*`, `CountAllExtendsByOne`, `CountAllShrinkLo`, `CountAllZeroFromOtherStart`, `NoOverlapAtAPos`, `NoOverlapPred` / `NoOverlapInstance`, `BranchTwoBodyBalance`, `BodyBalancedOpt`, `SpecBodyBalanceLoopInner`, `SpecBodyBalanceInner`, `RangeSpecLoopInnerAgreement`, `SpecBodyBalanceLoop`, `SpecBodyBalance`), loop invariants Dafny needs that can't be expressed in the TS surface, plus bridging asserts that thread facts from invariants to use-sites. The method-level `ensures res == range_spec(a, b, str)` is the headline universal claim; `SpecBodyBalance` is the Phase 5 derived theorem (unconditional body-balance).
+The diff between `index.dfy.gen` and `index.dfy` is additions-only — the spec functions (`range_spec`, `range_spec_loop`, plus the no-fallback variants `range_spec_inner` and `range_spec_loop_inner` introduced by Phase 4), proof-only lemmas (`CountAll`, `IndexOfMaxAt`, `CountAllExtend*`, `CountAllExtendsByOne`, `CountAllShrinkLo`, `CountAllZeroFromOtherStart`, `NoOverlapAtAPos`, `NoOverlapPred` / `NoOverlapInstance`, `BranchTwoBodyBalance`, `BodyBalancedOpt`, `SpecBodyBalanceLoopInner`, `SpecBodyBalanceInner`, `RangeSpecLoopInnerAgreement`, `SpecBodyBalanceLoop`, `SpecBodyBalance`, `FirstBalancedPairLoopInner`, `FirstBalancedPair`), loop invariants Dafny needs that can't be expressed in the TS surface, plus bridging asserts that thread facts from invariants to use-sites. The method-level `ensures res == range_spec(a, b, str)` is the headline universal claim; `SpecBodyBalance` is the Phase 5 derived theorem (unconditional body-balance) and `FirstBalancedPair` the Phase 6 derived theorem (leftmost-a characterization).
 
 ## LemmaScript toolchain additions driven by this case study
 

@@ -254,6 +254,7 @@ lemma NoOverlapInstance(a: string, b: string, s: string, p: nat)
   requires p + |b| <= |s|
   ensures s[p..p+|a|] != a || s[p..p+|b|] != b
 {
+  assert s[p..p+|a|] != a || s[p..p+|b|] != b;
 }
 
 // "When p has no sub-start, CountAll(s, sub, p, hi_b) == 0 where hi_b extends
@@ -942,6 +943,126 @@ lemma SpecBodyBalance(a: string, b: string, str: string)
   }
 }
 
+// ====================================================================
+// FirstBalancedPairLoopInner: inductive lemma about range_spec_loop_inner.
+// The bottom of the stack (begs[0]) is invariantly the FIRST push, fired in
+// iter 1 at `i == ai == initialAi`. Every subsequent push appends to the end;
+// branch 3 pops from the end only when |begs| >= 2 (so never touches begs[0]).
+// At branch 2 (the only way range_spec_loop_inner returns Some), result is
+// set to `Some([begs[0], bi])`, so v[0] == initialAi.
+// ====================================================================
+lemma FirstBalancedPairLoopInner(
+  a: string, b: string, str: string,
+  i: int, ai: int, bi: int,
+  begs: seq<int>, left: int, right: Option<int>,
+  result: Option<seq<int>>,
+  initialAi: int)
+  requires |a| > 0 && |b| > 0
+  requires ai >= -1 && (ai >= 0 ==> ai + |a| <= |str| && str[ai..ai+|a|] == a)
+  requires bi >= -1 && (bi >= 0 ==> bi + |b| <= |str| && str[bi..bi+|b|] == b)
+  requires i < 0 || i == ai || i == bi
+  requires forall j :: 0 <= j < |begs| ==>
+              0 <= begs[j] && begs[j] + |a| <= |str| && str[begs[j]..begs[j]+|a|] == a
+  requires match result {
+    case Some(v) => |v| == 2 && 0 <= v[0] && v[0] + |a| <= |str|
+                             && 0 <= v[1] && v[1] + |b| <= |str|
+                             && str[v[0]..v[0]+|a|] == a
+                             && str[v[1]..v[1]+|b|] == b
+    case None => true
+  }
+  // First-balanced-pair invariant: bottom of stack is initialAi.
+  requires |begs| > 0 ==> begs[0] == initialAi
+  // Iter-1 fresh-state guard: i == ai == initialAi (so the iter-1 push lands at initialAi).
+  requires |begs| == 0 && result.None? && i >= 0 ==> i == ai && ai == initialAi
+  // Result already carries the first-balanced-pair witness.
+  requires match result {
+    case Some(v) => v[0] == initialAi
+    case None => true
+  }
+  ensures match range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result) {
+    case Some(v) => v[0] == initialAi
+    case None => true
+  }
+  decreases (if result.Some? then 0 else 1)
+            + (if ai >= 0 then |str| - ai else 0)
+            + (if bi >= 0 then |str| - bi else 0)
+{
+  if i < 0 || result.Some? {
+    // Base case: returns result. Carries the witness by precondition.
+  } else if i == ai {
+    // Branch 1: push i_old, advance ai.
+    var i_old := i;
+    var newAi := StringIndexOfFrom(str, a, i + 1);
+    var newBegs := begs + [i_old];
+    var newI := if (newAi < bi) && (newAi >= 0) then newAi else bi;
+    // newBegs[0] == initialAi: either preserved (|begs| > 0) or freshly set
+    // (|begs| == 0, where fresh-state guard gives i_old == ai == initialAi).
+    if |begs| > 0 {
+      assert newBegs[0] == begs[0] == initialAi;
+    } else {
+      assert newBegs[0] == i_old == initialAi;
+    }
+    FirstBalancedPairLoopInner(a, b, str, newI, newAi, bi, newBegs, left, right, result, initialAi);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str, newI, newAi, bi, newBegs, left, right, result);
+  } else if |begs| == 1 {
+    // Branch 2: pop, set newResult.
+    var newResult := Some([begs[|begs| - 1], bi]);
+    var newBegs := begs[..|begs| - 1];
+    // begs[0] == initialAi (precondition), so newResult.value[0] == initialAi.
+    assert begs[|begs| - 1] == begs[0] == initialAi;
+    FirstBalancedPairLoopInner(a, b, str, i, ai, bi, newBegs, left, right, newResult, initialAi);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str, i, ai, bi, newBegs, left, right, newResult);
+  } else {
+    // Branch 3: pop top (if non-empty), maybe update left/right, advance bi.
+    var bi_old := bi;
+    var i_old := i;
+    var beg := if |begs| > 0 then Some(begs[|begs| - 1]) else None;
+    var newBegs := if |begs| > 0 then begs[..|begs| - 1] else begs;
+    var newLeftRight := match beg {
+      case Some(v) => if v < left then (v, Some(bi_old)) else (left, right)
+      case None => (left, right)
+    };
+    var newLeft := newLeftRight.0;
+    var newRight := newLeftRight.1;
+    var newBi := StringIndexOfFrom(str, b, i + 1);
+    var newI := if (ai < newBi) && (ai >= 0) then ai else newBi;
+    // If |begs| >= 2, newBegs[0] == begs[0] == initialAi.
+    // If |begs| == 0, newBegs == [] (vacuous).
+    // |begs| == 1 is branch 2, not branch 3.
+    if |newBegs| > 0 {
+      assert newBegs[0] == begs[0] == initialAi;
+    }
+    FirstBalancedPairLoopInner(a, b, str, newI, ai, newBi, newBegs, newLeft, newRight, result, initialAi);
+    assert range_spec_loop_inner(a, b, str, i, ai, bi, begs, left, right, result)
+        == range_spec_loop_inner(a, b, str, newI, ai, newBi, newBegs, newLeft, newRight, result);
+  }
+}
+
+// ====================================================================
+// FirstBalancedPair: the top-level theorem. When `range_spec_inner` returns
+// Some, the returned pair's first component is `StringIndexOf(str, a)` —
+// the algorithm picks the leftmost a-position to "close" against.
+// ====================================================================
+lemma FirstBalancedPair(a: string, b: string, str: string)
+  requires |a| > 0 && |b| > 0
+  ensures match range_spec_inner(a, b, str) {
+    case Some(v) => v[0] == StringIndexOf(str, a)
+    case None => true
+  }
+{
+  var ai := StringIndexOf(str, a);
+  var bi := StringIndexOfFrom(str, b, ai + 1);
+  if ai >= 0 && bi > 0 {
+    if a == b {
+      // range_spec_inner returns Some([ai, bi]); ai == StringIndexOf(str, a). ✓
+    } else {
+      FirstBalancedPairLoopInner(a, b, str, ai, ai, bi, [], |str|, None, None, ai);
+    }
+  }
+}
+
 method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   requires (|a| > 0)
   requires (|b| > 0)
@@ -954,10 +1075,11 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   ensures (match res { case Some(i_result_val) => (str[i_result_val[1]..(i_result_val[1] + |b|)] == b) case None => true })
   // ---- UNIVERSAL refinement ensures: imperative method computes the spec. ----
   // Body-balance is proved AS A THEOREM about `range_spec` (see SpecBodyBalance);
-  // it transfers to `range` via this refinement. Not added as a method ensures
-  // because the discharge requires bridging NoOverlapPred (filter form) against
-  // the codegen-emitted curried-implication NoOverlap precondition, which Z3
-  // doesn't auto-skolemize under --isolate-assertions.
+  // it transfers to `range` via this refinement. Not packaged as a method ensures
+  // because the discharge requires either bridging NoOverlapPred (filter form)
+  // against the codegen-emitted curried-implication NoOverlap precondition (Z3
+  // doesn't auto-unify), or rewriting the method's precondition to use
+  // NoOverlapPred directly (slows the existing CountAll invariants past budget).
   ensures res == range_spec(a, b, str)
 {
   var begs: seq<int> := [];
