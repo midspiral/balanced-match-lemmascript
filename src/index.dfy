@@ -1270,7 +1270,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
            == specFinal;
     match right {
       case Some(i_right_val) =>
-        if (|begs| > 0) {
+        if (|begs| != 0) {
           result := Some([left, i_right_val]);
         }
       case None =>
