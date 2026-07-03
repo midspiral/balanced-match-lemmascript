@@ -34,7 +34,8 @@
     "snap": "tap",
     "format": "prettier --write .",
     "benchmark": "node benchmark/index.js",
-    "typedoc": "typedoc --tsconfig .tshy/esm.json ./src/*.ts"
+    "typedoc": "typedoc --tsconfig .tshy/esm.json ./src/*.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/brace-expansion": "^1.1.2",
