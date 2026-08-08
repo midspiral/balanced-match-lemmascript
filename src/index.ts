@@ -32,13 +32,13 @@ export const range = (
   //@ verify
   //@ requires a.length > 0
   //@ requires b.length > 0
-  //@ requires forall(p: nat, p + a.length <= str.length && p + b.length <= str.length ==> (str.slice(p, p + a.length) !== a || str.slice(p, p + b.length) !== b))
-  //@ ensures \result !== undefined ==> \result.length === 2
-  //@ ensures \result !== undefined ==> \result[0] >= 0 && \result[0] + a.length <= str.length
-  //@ ensures \result !== undefined ==> \result[1] >= 0 && \result[1] + b.length <= str.length
-  //@ ensures \result !== undefined ==> \result[0] <= \result[1]
-  //@ ensures \result !== undefined ==> str.slice(\result[0], \result[0] + a.length) === a
-  //@ ensures \result !== undefined ==> str.slice(\result[1], \result[1] + b.length) === b
+  //@ requires forall((p: nat) => p + a.length <= str.length && p + b.length <= str.length ==> str.slice(p, p + a.length) !== a || str.slice(p, p + b.length) !== b)
+  //@ ensures $result !== undefined ==> $result.length === 2
+  //@ ensures $result !== undefined ==> $result[0] >= 0 && $result[0] + a.length <= str.length
+  //@ ensures $result !== undefined ==> $result[1] >= 0 && $result[1] + b.length <= str.length
+  //@ ensures $result !== undefined ==> $result[0] <= $result[1]
+  //@ ensures $result !== undefined ==> str.slice($result[0], $result[0] + a.length) === a
+  //@ ensures $result !== undefined ==> str.slice($result[1], $result[1] + b.length) === b
   let begs: number[],
     beg: number | undefined,
     left: number,
