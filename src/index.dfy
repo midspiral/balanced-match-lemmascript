@@ -204,6 +204,12 @@ lemma BranchTwoBodyBalance(a: string, b: string, str: string,
 // the verifier a concrete trigger). Avoids passing the unconstrained forall
 // across the lemma boundary, where its no-trigger shape causes brittle
 // instantiation under isolate_assertions.
+ghost predicate {:opaque} NoOverlapAt(a: string, b: string, s: string, p: nat)
+{
+  (p + |a| <= |s| && p + |b| <= |s|)
+    ==> (s[p..p + |a|] != a || s[p..p + |b|] != b)
+}
+
 lemma NoOverlapAtAPos(a: string, b: string, s: string, p: int)
   requires |a| > 0 && |b| > 0
   requires 0 <= p && p + |a| <= |s| && p + |b| <= |s|
@@ -1063,6 +1069,12 @@ lemma FirstBalancedPair(a: string, b: string, str: string)
   }
 }
 
+function StringSearchPosition(s: string, position: int): nat
+  ensures StringSearchPosition(s, position) <= |s|
+{
+  if position < 0 then 0 else if position > |s| then |s| else position
+}
+
 method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   requires (|a| > 0)
   requires (|b| > 0)
@@ -1082,13 +1094,21 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
   // NoOverlapPred directly (slows the existing CountAll invariants past budget).
   ensures res == range_spec(a, b, str)
 {
+  forall p: nat
+    ensures NoOverlapAt(a, b, str, p)
+  {
+    reveal NoOverlapAt();
+    if p + |a| <= |str| && p + |b| <= |str| {
+      assert (p + |a| <= |str|) ==> ((p + |b| <= |str|) ==> (str[p..p + |a|] != a || str[p..p + |b|] != b));
+    }
+  }
   var begs: seq<int> := [];
   var beg := None;
   var left := 0;
   var right := None;
   var result := None;
   var ai := StringIndexOf(str, a);
-  var bi := StringIndexOfFrom(str, b, (ai + 1));
+  var bi := StringIndexOfFrom(str, b, StringSearchPosition(str, (ai + 1)));
   var i := ai;
   if ((ai >= 0) && (bi > 0)) {
     if (a == b) {
@@ -1105,6 +1125,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
     ghost var initBi := bi;
     ghost var specFinal := range_spec_loop(a, b, str, ai, ai, bi, [], |str|, None, None);
     while ((i >= 0) && (match result { case Some(i_value) => false case None => true }))
+      invariant forall p: nat :: NoOverlapAt(a, b, str, p)
       invariant ((ai == -1) || (((ai >= 0) && ((ai + |a|) <= |str|)) && (str[ai..(ai + |a|)] == a)))
       invariant ((bi == -1) || (((bi >= 0) && ((bi + |b|) <= |str|)) && (str[bi..(bi + |b|)] == b)))
       invariant ((ai == -1) || (ai >= i))
@@ -1191,7 +1212,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
         assert i_old + |a| <= |str|;
         begs := (begs + [i]);
         pushedCount := pushedCount + 1;
-        ai := StringIndexOfFrom(str, a, (i + 1));
+        ai := StringIndexOfFrom(str, a, StringSearchPosition(str, (i + 1)));
         aiLowerBound := i + 1;
         assert ai == StringIndexOfFromN(str, a, i_old + 1);
         assert begs[0] == b0_old;
@@ -1207,6 +1228,8 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
             // Instantiate the method's NoOverlap forall at q = i_old. The
             // explicit assert pins the trigger; without it Dafny's auto trigger
             // selection misses the instantiation under isolate_assertions.
+            assert NoOverlapAt(a, b, str, i_old);
+            reveal NoOverlapAt();
             assert str[i_old..i_old + |a|] != a || str[i_old..i_old + |b|] != b;
             NoOverlapAtAPos(a, b, str, i_old);
           }
@@ -1252,7 +1275,7 @@ method range(a: string, b: string, str: string) returns (res: Option<seq<int>>)
           case None =>
 
         }
-        bi := StringIndexOfFrom(str, b, (i + 1));
+        bi := StringIndexOfFrom(str, b, StringSearchPosition(str, (i + 1)));
         biLowerBound := i + 1;
         // poppedCount maintenance when |begs| stays > 0 (pre-pop |begs| >= 2).
         if |begs| > 0 {
